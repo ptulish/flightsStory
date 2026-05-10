@@ -66,6 +66,18 @@ export async function runGmailScan({ userId, res, req }) {
       if (req.destroyed) break;
       const result = await jobs[j].waitUntilFinished(parseQueueEvents, 120000).catch(() => null);
       if (result?.inserted) ticketsFound += 1;
+      const extra = {};
+      if (result?.parsed) {
+        extra.latestDiscovery = {
+          airline: result.parsed.airline,
+          from_iata: result.parsed.from_iata,
+          to_iata: result.parsed.to_iata,
+          departure_date: result.parsed.departure_date,
+        };
+      }
+      if (result?.unresolved) {
+        extra.latestUnresolved = result.unresolved;
+      }
       // Keep progress in "fetch" while batching to avoid regressions in stage percent.
       emitStageProgress(
         res,
@@ -75,16 +87,7 @@ export async function runGmailScan({ userId, res, req }) {
         sourceLabel,
         messagesScanned.value,
         ticketsFound,
-        result?.parsed
-          ? {
-              latestDiscovery: {
-                airline: result.parsed.airline,
-                from_iata: result.parsed.from_iata,
-                to_iata: result.parsed.to_iata,
-                departure_date: result.parsed.departure_date,
-              },
-            }
-          : undefined,
+        Object.keys(extra).length ? extra : undefined,
       );
     }
   };

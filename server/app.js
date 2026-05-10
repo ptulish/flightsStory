@@ -7,7 +7,16 @@ import { env } from './shared/env.js';
 import { httpLogger, logger } from './shared/logger.js';
 import { getBearerToken, signScanToken, verifyScanToken } from './shared/auth.js';
 import { initSse, sseError } from './shared/sse.js';
-import { ensureSchema, getUserById, saveGoogleTokens, upsertUser } from './db.js';
+import {
+  ensureSchema,
+  getUserById,
+  ignoreUnresolvedFlight,
+  listFlights,
+  listUnresolvedFlights,
+  resolveUnresolvedFlight,
+  saveGoogleTokens,
+  upsertUser,
+} from './db.js';
 import {
   bindWorkerLogs,
   createParserWorker,
@@ -224,6 +233,51 @@ export async function createApp() {
     }
   });
 
+  app.get('/api/review/unresolved', async (req, res) => {
+    try {
+      const auth = getAuthFromRequest(req);
+      const user = await getUserById(auth.sub);
+      if (!user) throw new Error('User not found');
+      const items = await listUnresolvedFlights(user.id, auth.source);
+      res.json({ items });
+    } catch (error) {
+      logger.warn({ err: error }, 'list unresolved failed');
+      res.status(401).json({ error: error.message || 'Unauthorized' });
+    }
+  });
+
+  app.post('/api/review/unresolved/:id/resolve', async (req, res) => {
+    try {
+      const auth = getAuthFromRequest(req);
+      const user = await getUserById(auth.sub);
+      if (!user) throw new Error('User not found');
+      await resolveUnresolvedFlight(user.id, String(req.params.id), req.body || {});
+      const [items, flights] = await Promise.all([
+        listUnresolvedFlights(user.id, auth.source),
+        listFlights(user.id, auth.source),
+      ]);
+      res.json({ ok: true, items, flights });
+    } catch (error) {
+      logger.warn({ err: error }, 'resolve unresolved failed');
+      res.status(400).json({ error: error.message || 'Unable to resolve item' });
+    }
+  });
+
+  app.post('/api/review/unresolved/:id/ignore', async (req, res) => {
+    try {
+      const auth = getAuthFromRequest(req);
+      const user = await getUserById(auth.sub);
+      if (!user) throw new Error('User not found');
+      const ok = await ignoreUnresolvedFlight(user.id, String(req.params.id));
+      if (!ok) throw new Error('Unresolved ticket not found');
+      const items = await listUnresolvedFlights(user.id, auth.source);
+      res.json({ ok: true, items });
+    } catch (error) {
+      logger.warn({ err: error }, 'ignore unresolved failed');
+      res.status(400).json({ error: error.message || 'Unable to ignore item' });
+    }
+  });
+
   app.use((error, _req, res, _next) => {
     logger.error({ err: error, message: error?.message }, 'Unhandled API error');
     if (res.headersSent) return;
@@ -269,4 +323,9 @@ function withParams(url, params) {
     next.searchParams.set(k, String(v));
   }
   return next.toString();
+}
+
+function getAuthFromRequest(req) {
+  const token = getBearerToken(req) || String(req.query.scanToken || '');
+  return verifyScanToken(token);
 }

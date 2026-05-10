@@ -51,7 +51,32 @@ export async function ensureSchema() {
       UNIQUE (user_id, source, message_hash)
     );
 
+    CREATE TABLE IF NOT EXISTS unresolved_flights (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      source TEXT NOT NULL,
+      message_hash TEXT NOT NULL,
+      reason_codes TEXT[] NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'pending',
+      subject TEXT,
+      body_snippet TEXT,
+      message_id TEXT,
+      received_at TIMESTAMPTZ,
+      airline TEXT,
+      flight_number TEXT,
+      from_iata TEXT,
+      to_iata TEXT,
+      departure_date TIMESTAMPTZ,
+      raw_payload JSONB,
+      resolved_flight_id TEXT,
+      resolved_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (user_id, source, message_hash)
+    );
+
     CREATE INDEX IF NOT EXISTS flights_user_idx ON flights(user_id, departure_date DESC);
+    CREATE INDEX IF NOT EXISTS unresolved_user_status_idx
+      ON unresolved_flights(user_id, status, created_at DESC);
   `);
   await migrateFlightDedupSchema();
 }
@@ -211,6 +236,176 @@ export async function storeFlight(userId, source, messageHash, flight, rawPayloa
     ],
   );
   return Boolean(rows[0]);
+}
+
+export async function storeUnresolvedFlight(userId, source, messageHash, unresolved, rawPayload) {
+  if (!unresolved) return false;
+  const id = crypto.randomUUID();
+  const reasonCodes = Array.isArray(unresolved.reason_codes) ? unresolved.reason_codes : [];
+  const { rows } = await pool.query(
+    `
+      INSERT INTO unresolved_flights (
+        id, user_id, source, message_hash, reason_codes, status, subject, body_snippet, message_id,
+        received_at, airline, flight_number, from_iata, to_iata, departure_date, raw_payload
+      )
+      VALUES ($1,$2,$3,$4,$5,'pending',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+      ON CONFLICT (user_id, source, message_hash)
+      DO UPDATE SET
+        reason_codes = EXCLUDED.reason_codes,
+        status = 'pending',
+        subject = EXCLUDED.subject,
+        body_snippet = EXCLUDED.body_snippet,
+        message_id = EXCLUDED.message_id,
+        received_at = EXCLUDED.received_at,
+        airline = EXCLUDED.airline,
+        flight_number = EXCLUDED.flight_number,
+        from_iata = EXCLUDED.from_iata,
+        to_iata = EXCLUDED.to_iata,
+        departure_date = EXCLUDED.departure_date,
+        raw_payload = EXCLUDED.raw_payload,
+        resolved_flight_id = NULL,
+        resolved_at = NULL
+      RETURNING id
+    `,
+    [
+      id,
+      userId,
+      source,
+      messageHash,
+      reasonCodes,
+      unresolved.subject || null,
+      unresolved.body_snippet || null,
+      unresolved.message_id || null,
+      unresolved.received_at || null,
+      unresolved.airline || null,
+      unresolved.flight_number || null,
+      unresolved.from_iata || null,
+      unresolved.to_iata || null,
+      unresolved.departure_date || null,
+      rawPayload || null,
+    ],
+  );
+  return Boolean(rows[0]);
+}
+
+export async function listUnresolvedFlights(userId, source) {
+  const params = [userId, 'pending'];
+  let where = 'user_id = $1 AND status = $2';
+  if (source) {
+    params.push(source);
+    where += ` AND source = $${params.length}`;
+  }
+  const { rows } = await pool.query(
+    `
+      SELECT
+        id,
+        source,
+        reason_codes,
+        subject,
+        body_snippet,
+        message_id,
+        received_at,
+        airline,
+        flight_number,
+        from_iata,
+        to_iata,
+        departure_date,
+        raw_payload,
+        created_at
+      FROM unresolved_flights
+      WHERE ${where}
+      ORDER BY created_at DESC
+      LIMIT 120
+    `,
+    params,
+  );
+  return rows;
+}
+
+export async function ignoreUnresolvedFlight(userId, unresolvedId) {
+  const { rowCount } = await pool.query(
+    `
+      UPDATE unresolved_flights
+      SET status = 'ignored', resolved_at = now()
+      WHERE id = $1 AND user_id = $2 AND status = 'pending'
+    `,
+    [unresolvedId, userId],
+  );
+  return rowCount > 0;
+}
+
+export async function resolveUnresolvedFlight(userId, unresolvedId, patch = {}) {
+  const { rows } = await pool.query(
+    `
+      SELECT *
+      FROM unresolved_flights
+      WHERE id = $1 AND user_id = $2 AND status = 'pending'
+      LIMIT 1
+    `,
+    [unresolvedId, userId],
+  );
+  const item = rows[0];
+  if (!item) throw new Error('Unresolved ticket not found');
+
+  const airline = String(patch.airline || item.airline || '')
+    .trim()
+    .toUpperCase();
+  const fromIata = String(patch.from_iata || item.from_iata || '')
+    .trim()
+    .toUpperCase();
+  const toIata = String(patch.to_iata || item.to_iata || '')
+    .trim()
+    .toUpperCase();
+  const dateValue = patch.departure_date || item.departure_date;
+
+  if (!/^[A-Z0-9]{2}$/.test(airline) || /^\d{2}$/.test(airline)) {
+    throw new Error('Airline must be a valid 2-char IATA carrier code');
+  }
+  if (!/^[A-Z]{3}$/.test(fromIata) || !/^[A-Z]{3}$/.test(toIata)) {
+    throw new Error('Route must contain valid IATA airport codes');
+  }
+  const departureDate = new Date(dateValue);
+  if (Number.isNaN(departureDate.getTime())) {
+    throw new Error('Departure date is required');
+  }
+
+  const designator = flightDesignator(
+    patch.flight_number || item.flight_number || '',
+    airline,
+  );
+  const m = designator.match(/^([A-Z0-9]{2})(\d{1,4})$/);
+  if (!m) throw new Error('Flight number is required');
+  const flightNumber = `${m[1]} ${m[2]}`;
+
+  const flight = {
+    id: crypto.randomUUID(),
+    airline,
+    flight_number: flightNumber,
+    from_iata: fromIata,
+    to_iata: toIata,
+    departure_date: departureDate.toISOString(),
+    duration_min: null,
+    price: null,
+    currency: 'USD',
+    cabin: 'economy',
+    raw_subject: item.subject || 'Manual review',
+  };
+
+  await storeFlight(userId, item.source, item.message_hash, flight, {
+    ...(item.raw_payload || {}),
+    manualResolution: true,
+    unresolvedId: item.id,
+  });
+
+  await pool.query(
+    `
+      UPDATE unresolved_flights
+      SET status = 'resolved', resolved_at = now()
+      WHERE id = $1 AND user_id = $2
+    `,
+    [item.id, userId],
+  );
+  return true;
 }
 
 export async function listFlights(userId, source) {

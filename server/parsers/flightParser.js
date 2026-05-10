@@ -148,13 +148,17 @@ function extractDepartureDateFromChunk(text) {
 }
 
 export async function parseFlightFromEmail(message) {
+  const result = await parseFlightFromEmailDetailed(message);
+  return result.flight;
+}
+
+export async function parseFlightFromEmailDetailed(message) {
   const llmParsed = await parseViaGemini(message);
   const candidate = llmParsed || parseHeuristically(message);
-  if (!candidate) return null;
+  if (!candidate) return { flight: null, unresolved: null, reason: 'no-flight-candidate' };
 
   const from = await resolveAirport(candidate.from_iata);
   const to = await resolveAirport(candidate.to_iata);
-  if (!from || !to) return null;
 
   let airline = normalizeAirline(candidate.airline);
   if (!isValidIataCarrierCode(airline)) {
@@ -166,7 +170,6 @@ export async function parseFlightFromEmail(message) {
   if (!isValidIataCarrierCode(airline)) {
     airline = inferAirlineFromText(message.subject, message.bodyText);
   }
-  if (!isValidIataCarrierCode(airline)) return null;
 
   const text = `${message.subject || ''}\n${message.bodyText || ''}`;
   const extractedDate = extractDepartureDateString(text, message.receivedAt);
@@ -176,21 +179,46 @@ export async function parseFlightFromEmail(message) {
   const departureDate = normalizeDepartureDate(
     pickPreferredDepartureDate(candidate.departure_date, extractedDate, message.receivedAt),
   );
-  if (!flightNumber || !departureDate) return null;
+  const issues = [];
+  if (!from || !to) issues.push('missing_route');
+  if (!isValidIataCarrierCode(airline)) issues.push('missing_airline');
+  if (!flightNumber) issues.push('missing_flight_number');
+  if (!departureDate) issues.push('missing_departure_date');
+
+  if (issues.length > 0) {
+    return {
+      flight: null,
+      unresolved: buildUnresolvedDraft({
+        message,
+        candidate,
+        issues,
+        from,
+        to,
+        airline,
+        flightNumber,
+        departureDate,
+      }),
+      reason: issues.join(','),
+    };
+  }
 
   return {
-    id: crypto.randomUUID(),
-    airline,
-    flight_number: flightNumber,
-    from_iata: from.iata,
-    to_iata: to.iata,
-    departure_date: departureDate,
-    duration_min: asOptionalInt(candidate.duration_min),
-    price: asOptionalNumber(candidate.price),
-    currency: normalizeCurrency(candidate.currency),
-    cabin: normalizeCabin(candidate.cabin),
-    source: message.source,
-    raw_subject: message.subject || 'Flight ticket',
+    flight: {
+      id: crypto.randomUUID(),
+      airline,
+      flight_number: flightNumber,
+      from_iata: from.iata,
+      to_iata: to.iata,
+      departure_date: departureDate,
+      duration_min: asOptionalInt(candidate.duration_min),
+      price: asOptionalNumber(candidate.price),
+      currency: normalizeCurrency(candidate.currency),
+      cabin: normalizeCabin(candidate.cabin),
+      source: message.source,
+      raw_subject: message.subject || 'Flight ticket',
+    },
+    unresolved: null,
+    reason: null,
   };
 }
 
@@ -379,6 +407,68 @@ function pickPreferredDepartureDate(modelDate, extractedDate, receivedAt) {
   const eDay = e.slice(0, 10);
   if (receivedDay && mDay === receivedDay && eDay !== receivedDay) return e;
   return m;
+}
+
+function buildUnresolvedDraft({
+  message,
+  candidate,
+  issues,
+  from,
+  to,
+  airline,
+  flightNumber,
+  departureDate,
+}) {
+  const critical =
+    issues.includes('missing_airline') || issues.includes('missing_departure_date');
+  if (!critical) return null;
+
+  const fromIata = from?.iata || normalizeIata(candidate?.from_iata);
+  const toIata = to?.iata || normalizeIata(candidate?.to_iata);
+  if (!fromIata || !toIata) return null;
+
+  const text = `${message?.subject || ''}\n${message?.bodyText || ''}`;
+  const derivedAirline = isValidIataCarrierCode(airline) ? airline : normalizeAirline(candidate?.airline);
+  const derivedFlight =
+    flightNumber ||
+    extractFlightNumberFromText(String(candidate?.flight_number || ''), derivedAirline) ||
+    extractFlightNumberFromText(text, derivedAirline) ||
+    null;
+  const derivedDate =
+    departureDate ||
+    normalizeDepartureDate(candidate?.departure_date) ||
+    normalizeDepartureDate(extractDepartureDateString(text, message?.receivedAt));
+
+  return {
+    reason_codes: issues,
+    source: message?.source || 'gmail',
+    subject: message?.subject || '',
+    body_snippet: makeBodySnippet(message?.bodyText),
+    message_id: message?.messageId || null,
+    received_at: normalizeAnyDate(message?.receivedAt),
+    from_iata: fromIata,
+    to_iata: toIata,
+    airline: derivedAirline || null,
+    flight_number: derivedFlight || null,
+    departure_date: derivedDate || null,
+  };
+}
+
+function normalizeIata(value) {
+  const v = String(value || '').trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(v) ? v : null;
+}
+
+function makeBodySnippet(value) {
+  const clean = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return '';
+  return clean.slice(0, 1200);
+}
+
+function normalizeAnyDate(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 function inferAirlineFromText(subject, bodyText) {

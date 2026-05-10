@@ -57,6 +57,18 @@ export async function runIcloudScan({ userId, res, req, session }) {
       if (req.destroyed) break;
       const result = await jobs[j].waitUntilFinished(parseQueueEvents, 120000).catch(() => null);
       if (result?.inserted) ticketsFound += 1;
+      const extra = {};
+      if (result?.parsed) {
+        extra.latestDiscovery = {
+          airline: result.parsed.airline,
+          from_iata: result.parsed.from_iata,
+          to_iata: result.parsed.to_iata,
+          departure_date: result.parsed.departure_date,
+        };
+      }
+      if (result?.unresolved) {
+        extra.latestUnresolved = result.unresolved;
+      }
       emitStageProgress(
         res,
         3,
@@ -65,16 +77,7 @@ export async function runIcloudScan({ userId, res, req, session }) {
         sourceLabel,
         messagesScanned,
         ticketsFound,
-        result?.parsed
-          ? {
-              latestDiscovery: {
-                airline: result.parsed.airline,
-                from_iata: result.parsed.from_iata,
-                to_iata: result.parsed.to_iata,
-                departure_date: result.parsed.departure_date,
-              },
-            }
-          : undefined,
+        Object.keys(extra).length ? extra : undefined,
       );
     }
   };

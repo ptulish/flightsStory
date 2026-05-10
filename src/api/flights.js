@@ -177,6 +177,62 @@ export async function startIcloudSession(payload) {
   return res.json();
 }
 
+export async function fetchUnresolvedFlights({ account, signal } = {}) {
+  if (!account?.scanToken) return [];
+  const res = await fetch(`${API_BASE}/api/review/unresolved`, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${account.scanToken}`,
+    },
+    signal,
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Failed to load unresolved tickets');
+  }
+  const data = await res.json();
+  return Array.isArray(data.items) ? data.items : [];
+}
+
+export async function resolveUnresolvedFlight({
+  account,
+  unresolvedId,
+  patch,
+  signal,
+} = {}) {
+  if (!account?.scanToken) throw new Error('Missing scan token');
+  const res = await fetch(`${API_BASE}/api/review/unresolved/${encodeURIComponent(unresolvedId)}/resolve`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      Authorization: `Bearer ${account.scanToken}`,
+    },
+    body: JSON.stringify(patch || {}),
+    signal,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Failed to resolve ticket');
+  return {
+    items: Array.isArray(data.items) ? data.items : [],
+    flights: Array.isArray(data.flights) ? data.flights : null,
+  };
+}
+
+export async function ignoreUnresolvedFlight({ account, unresolvedId, signal } = {}) {
+  if (!account?.scanToken) throw new Error('Missing scan token');
+  const res = await fetch(`${API_BASE}/api/review/unresolved/${encodeURIComponent(unresolvedId)}/ignore`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${account.scanToken}`,
+    },
+    signal,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Failed to ignore ticket');
+  return Array.isArray(data.items) ? data.items : [];
+}
+
 function parseSseChunk(chunk) {
   if (!chunk.trim()) return null;
   let event = 'message';

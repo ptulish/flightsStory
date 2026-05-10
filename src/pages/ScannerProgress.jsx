@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Plane, MailSearch, Sparkles, CheckCircle2, Loader2 } from 'lucide-react';
+import { Plane, MailSearch, Sparkles, CheckCircle2, Loader2, AlertTriangle } from 'lucide-react';
 import { useSession } from '../state/session.jsx';
 import { fetchDemo, fetchGmail, fetchIcloud } from '../api/flights';
 import { getAirport } from '../data/airports';
@@ -34,6 +34,7 @@ export default function ScannerProgress() {
     stageTotalSteps: 0,
   });
   const [recentTickets, setRecentTickets] = useState([]);
+  const [liveUnresolved, setLiveUnresolved] = useState([]);
   const startedRef = useRef(false);
 
   useEffect(() => {
@@ -41,6 +42,8 @@ export default function ScannerProgress() {
     startedRef.current = true;
     setStartedAt(Date.now());
     setLastEventAt(Date.now());
+    setRecentTickets([]);
+    setLiveUnresolved([]);
 
     const controller = new AbortController();
     const fn =
@@ -59,6 +62,14 @@ export default function ScannerProgress() {
           const key = `${item.airline}-${item.from_iata}-${item.to_iata}-${item.departure_date}`;
           setRecentTickets((prev) => {
             const next = [item, ...prev.filter((x) => `${x.airline}-${x.from_iata}-${x.to_iata}-${x.departure_date}` !== key)];
+            return next.slice(0, 6);
+          });
+        }
+        if (p.latestUnresolved) {
+          const item = p.latestUnresolved;
+          const k = unresolvedKey(item);
+          setLiveUnresolved((prev) => {
+            const next = [item, ...prev.filter((x) => unresolvedKey(x) !== k)];
             return next.slice(0, 6);
           });
         }
@@ -141,6 +152,7 @@ export default function ScannerProgress() {
             ticketsFound={progress.ticketsFound}
             stageStep={progress.stageStep}
             recent={recentTickets}
+            unresolved={liveUnresolved}
           />
         </div>
       </motion.div>
@@ -319,7 +331,7 @@ function formatDurationShort(totalSec) {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-function RecentDiscoveries({ source, stageKey, ticketsFound, stageStep, recent }) {
+function RecentDiscoveries({ source, stageKey, ticketsFound, stageStep, recent, unresolved }) {
   const showTicker = stageKey === 'fetch' || stageKey === 'parse' || stageKey === 'save';
   const useDemoFallback = source === 'demo';
   const fakeFeed = useFakeTicker(ticketsFound, stageStep, showTicker && useDemoFallback);
@@ -375,6 +387,47 @@ function RecentDiscoveries({ source, stageKey, ticketsFound, stageStep, recent }
           </div>
         )}
       </div>
+
+      {unresolved?.length > 0 && (
+        <div className="mt-5">
+          <p className="label">Needs review now</p>
+          <div className="mt-3 grid gap-2">
+            <AnimatePresence initial={false}>
+              {unresolved.slice(0, 4).map((u, i) => (
+                <motion.div
+                  key={unresolvedKey(u) || `u-${i}`}
+                  layout
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.25 }}
+                  className="rounded-xl border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-100"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="truncate font-medium">{u.subject || 'Unresolved ticket email'}</p>
+                      <p className="mt-0.5 text-[11px] text-amber-200/85">
+                        {u.from_iata || '---'} → {u.to_iata || '---'} · {(u.reason_codes || []).join(', ') || 'needs manual check'}
+                      </p>
+                    </div>
+                    <AlertTriangle className="h-4 w-4 shrink-0 text-amber-300" />
+                  </div>
+                  {u.source === 'gmail' && u.subject && (
+                    <a
+                      href={`https://mail.google.com/mail/u/0/#search/${encodeURIComponent(u.subject)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-1 inline-block underline-offset-2 hover:underline"
+                    >
+                      Open in Gmail
+                    </a>
+                  )}
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -398,3 +451,14 @@ const SAMPLE_FEED = [
   { airline: 'KL', from_iata: 'AMS', to_iata: 'LHR', departure_date: '2024-04-22T18:10' },
   { airline: 'SU', from_iata: 'SVO', to_iata: 'LED', departure_date: '2023-04-15T08:30' },
 ];
+
+function unresolvedKey(item) {
+  return [
+    item?.source || '',
+    item?.message_id || '',
+    item?.subject || '',
+    item?.from_iata || '',
+    item?.to_iata || '',
+    item?.departure_date || '',
+  ].join('|');
+}

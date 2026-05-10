@@ -3,8 +3,8 @@ import IORedis from 'ioredis';
 import { Queue, QueueEvents, Worker } from 'bullmq';
 import { env } from './shared/env.js';
 import { logger } from './shared/logger.js';
-import { parseFlightFromEmail } from './parsers/flightParser.js';
-import { storeFlight } from './db.js';
+import { parseFlightFromEmailDetailed } from './parsers/flightParser.js';
+import { storeFlight, storeUnresolvedFlight } from './db.js';
 import { getJsonCache, setJsonCache } from './cache.js';
 
 export const redis = new IORedis(env.REDIS_URL, {
@@ -38,14 +38,34 @@ export function createParserWorker() {
   return new Worker(
     'flight-parse',
     async (job) => {
-      const parsed = await parseFlightFromEmail(job.data);
-      if (!parsed) return { inserted: false, reason: 'no-flight' };
+      const parsed = await parseFlightFromEmailDetailed(job.data);
+      if (!parsed.flight) {
+        if (parsed.unresolved) {
+          await storeUnresolvedFlight(
+            job.data.userId,
+            job.data.source,
+            job.data.messageHash,
+            parsed.unresolved,
+            {
+              subject: job.data.subject,
+              receivedAt: job.data.receivedAt,
+              messageId: job.data.messageId ?? null,
+              internalDateMs: job.data.internalDateMs ?? null,
+            },
+          );
+        }
+        return {
+          inserted: false,
+          reason: parsed.reason || 'no-flight',
+          unresolved: parsed.unresolved || null,
+        };
+      }
 
       const inserted = await storeFlight(
         job.data.userId,
         job.data.source,
         job.data.messageHash,
-        parsed,
+        parsed.flight,
         {
           subject: job.data.subject,
           receivedAt: job.data.receivedAt,
@@ -54,7 +74,7 @@ export function createParserWorker() {
         },
       );
 
-      return { inserted, parsed };
+      return { inserted, parsed: parsed.flight };
     },
     {
       connection,
