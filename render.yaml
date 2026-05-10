@@ -1,4 +1,9 @@
 services:
+  # Redis-compatible cache/queue (NOT under `databases:` — that list is Postgres-only)
+  - type: keyvalue
+    name: skyhistory-redis
+    ipAllowList: []
+
   - type: web
     name: skyhistory-api
     runtime: node
@@ -29,7 +34,7 @@ services:
           property: connectionString
       - key: REDIS_URL
         fromService:
-          type: redis
+          type: keyvalue
           name: skyhistory-redis
           property: connectionString
 
@@ -55,13 +60,10 @@ services:
           property: connectionString
       - key: REDIS_URL
         fromService:
-          type: redis
+          type: keyvalue
           name: skyhistory-redis
           property: connectionString
 
 databases:
   - name: skyhistory-postgres
     databaseName: skyhistory
-
-  - name: skyhistory-redis
-    type: redis
