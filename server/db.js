@@ -112,6 +112,33 @@ async function migrateFlightDedupSchema() {
     )
   `);
 
+  /** Garbage-only duplicates (e.g. three XX rows for one segment) without touching mixed carrier groups. */
+  await pool.query(`
+    DELETE FROM flights
+    WHERE id IN (
+      SELECT id FROM (
+        SELECT f.id,
+          ROW_NUMBER() OVER (
+            PARTITION BY f.user_id, f.from_iata, f.to_iata,
+              date_trunc('minute', f.departure_date)
+            ORDER BY length(f.flight_number) DESC, f.created_at ASC, f.id ASC
+          ) AS rn
+        FROM flights f
+        INNER JOIN (
+          SELECT user_id, from_iata, to_iata, date_trunc('minute', departure_date) AS slot
+          FROM flights
+          GROUP BY user_id, from_iata, to_iata, date_trunc('minute', departure_date)
+          HAVING COUNT(*) > 1 AND bool_and(upper(airline) IN ('XX', 'UN'))
+        ) x
+          ON f.user_id = x.user_id
+          AND f.from_iata = x.from_iata
+          AND f.to_iata = x.to_iata
+          AND date_trunc('minute', f.departure_date) = x.slot
+      ) t
+      WHERE rn > 1
+    )
+  `);
+
   await pool.query(
     `ALTER TABLE flights DROP CONSTRAINT IF EXISTS flights_user_id_source_message_hash_key`,
   );

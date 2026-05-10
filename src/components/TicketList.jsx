@@ -19,7 +19,11 @@ import {
   formatDuration,
   formatKm,
 } from '../utils/format';
-import { displayFlightNumberDigits, resolveCarrierCode } from '../utils/flightDisplay';
+import {
+  displayFlightNumberDigits,
+  formatFlightNumberForTicket,
+  resolveCarrierCode,
+} from '../utils/flightDisplay';
 
 export default function TicketList({
   flights,
@@ -198,7 +202,7 @@ function Row({ flight, index, compact }) {
   const from = flight.from || getAirport(flight.from_iata);
   const to = flight.to || getAirport(flight.to_iata);
   const airline = flight.airline_info || getAirline(resolveCarrierCode(flight));
-  const flightNo = displayFlightNumberDigits(flight);
+  const flightNo = formatFlightNumberForTicket(flight);
 
   return (
     <motion.div

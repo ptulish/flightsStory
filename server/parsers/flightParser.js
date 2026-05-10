@@ -3,6 +3,10 @@ import { AIRPORTS } from '../../src/data/airports.js';
 import { AIRLINES } from '../../src/data/airlines.js';
 import { env } from '../shared/env.js';
 import { getJsonCache, setJsonCache } from '../cache.js';
+import {
+  extractBestFlightDesignatorFromText,
+  extractRouteIatasFromText,
+} from './flightTextExtraction.js';
 
 const IATA_RE = /\b[A-Z]{3}\b/g;
 /** IATA carrier + flight number only (no purely numeric "airline" like 202). */
@@ -160,6 +164,9 @@ export async function parseFlightFromEmailDetailed(message) {
   const from = await resolveAirport(candidate.from_iata);
   const to = await resolveAirport(candidate.to_iata);
 
+  const text = `${message.subject || ''}\n${message.bodyText || ''}`;
+  const bodyDesignator = extractBestFlightDesignatorFromText(message.subject, message.bodyText);
+
   let airline = normalizeAirline(candidate.airline);
   if (!isValidIataCarrierCode(airline)) {
     airline = carrierPrefixFromFlightNumber(candidate.flight_number);
@@ -170,12 +177,20 @@ export async function parseFlightFromEmailDetailed(message) {
   if (!isValidIataCarrierCode(airline)) {
     airline = inferAirlineFromText(message.subject, message.bodyText);
   }
+  if (!isValidIataCarrierCode(airline) && bodyDesignator) {
+    airline = bodyDesignator.carrier;
+  }
 
-  const text = `${message.subject || ''}\n${message.bodyText || ''}`;
   const extractedDate = extractDepartureDateString(text, message.receivedAt);
-  const flightNumber =
+  let flightNumber =
     normalizeFlightNumber(candidate.flight_number, airline) ||
     normalizeFlightNumber(extractFlightNumberFromText(text, airline), airline);
+
+  if (shouldPreferBodyDesignator(candidate, airline, flightNumber, bodyDesignator)) {
+    airline = bodyDesignator.carrier;
+    flightNumber = bodyDesignator.formatted;
+  }
+
   const departureDate = normalizeDepartureDate(
     pickPreferredDepartureDate(candidate.departure_date, extractedDate, message.receivedAt),
   );
@@ -183,6 +198,7 @@ export async function parseFlightFromEmailDetailed(message) {
   if (!from || !to) issues.push('missing_route');
   if (!isValidIataCarrierCode(airline)) issues.push('missing_airline');
   if (!flightNumber) issues.push('missing_flight_number');
+  else if (String(flightNumber).toUpperCase().startsWith('XX ')) issues.push('missing_airline');
   if (!departureDate) issues.push('missing_departure_date');
 
   if (issues.length > 0) {
@@ -237,8 +253,9 @@ async function resolveAirport(iataRaw) {
 
 function parseHeuristically({ subject, bodyText, receivedAt }) {
   const text = `${subject || ''}\n${bodyText || ''}`;
+  const routeHint = extractRouteIatasFromText(text);
   const iatas = Array.from(new Set(text.match(IATA_RE) || [])).filter((code) => AIRPORTS[code]);
-  if (iatas.length < 2) return null;
+  if (iatas.length < 2 && (!routeHint || !AIRPORTS[routeHint.from] || !AIRPORTS[routeHint.to])) return null;
 
   const airlineMatch = text.match(AIRLINE_RE);
   const priceMatch = text.match(PRICE_RE);
@@ -254,11 +271,22 @@ function parseHeuristically({ subject, bodyText, receivedAt }) {
   if (priceMatch?.[0]?.includes('GBP') || priceMatch?.[0]?.includes('£')) currency = 'GBP';
   if (priceMatch?.[0]?.includes('RUB')) currency = 'RUB';
 
+  let fromIata;
+  let toIata;
+  if (routeHint && AIRPORTS[routeHint.from] && AIRPORTS[routeHint.to]) {
+    fromIata = routeHint.from;
+    toIata = routeHint.to;
+  } else {
+    fromIata = iatas[0];
+    toIata = iatas[1];
+  }
+  if (!fromIata || !toIata) return null;
+
   return {
     airline,
     flight_number: `${airline} ${num}`,
-    from_iata: iatas[0],
-    to_iata: iatas[1],
+    from_iata: fromIata,
+    to_iata: toIata,
     departure_date: date,
     price: priceMatch ? Number(priceMatch[1].replace(',', '.')) : null,
     currency,
@@ -275,7 +303,7 @@ Return ONLY a JSON object with keys:
 airline, flight_number, from_iata, to_iata, departure_date, duration_min, price, currency, cabin.
 
 Rules:
-- airline MUST be the 2-character IATA airline designator only (examples: LH, BT, FR, W6, TK, QR). Never a flight number, never three digits, never a long word.
+- airline MUST be the 2-character IATA airline designator only (examples: LH, OS, BT, FR, W6, TK, QR). Never a flight number, never three digits, never a long word. Never use XX.
 - flight_number MUST look like "LH 410" or "BT 282" (carrier space digits).
 - from_iata, to_iata: 3-letter IATA airport codes only.
 - departure_date: scheduled takeoff datetime from itinerary/ticket in ISO 8601. Ignore email sent date, reminder date, check-in-open date, issue date. Do NOT use today's date. If unknown, return {}.
@@ -320,11 +348,12 @@ function extractJsonObjectFromModelText(raw) {
   }
 }
 
-/** IATA airline designator: two chars; reject numeric-only (e.g. "37", "202"). */
+/** IATA airline designator: two chars; reject numeric-only (e.g. "37", "202") and placeholder XX */
 function isValidIataCarrierCode(code) {
   if (!code || typeof code !== 'string') return false;
   const c = code.trim().toUpperCase();
   if (c.length !== 2) return false;
+  if (c === 'XX') return false;
   if (/^\d{2}$/.test(c)) return false;
   return /^[A-Z0-9]{2}$/.test(c);
 }
@@ -477,7 +506,12 @@ function inferAirlineFromText(subject, bodyText) {
 
   const aliases = [
     ['LH', ['lufthansa']],
+    ['OS', ['austrian', 'austrian airlines', 'aua']],
     ['BT', ['airbaltic', 'air baltic']],
+    ['EW', ['eurowings']],
+    ['EN', ['dolomiti', 'air dolomiti']],
+    ['LX', ['swiss ', ' swiss', 'swiss international']],
+    ['SN', ['brussels airlines', 'brussels airline']],
     ['FR', ['ryanair']],
     ['W6', ['wizz', 'wizzair', 'wizz air']],
     ['U2', ['easyjet', 'easy jet']],
@@ -489,13 +523,35 @@ function inferAirlineFromText(subject, bodyText) {
     ['BA', ['british airways']],
     ['EK', ['emirates']],
     ['QR', ['qatar airways', 'qatar']],
+    ['LO', ['lot polish', 'lot airline']],
+    ['SK', ['sas ', ' scandinavian']],
+    ['AY', ['finnair']],
+    ['TP', ['tap air', 'portugal']],
+    ['A3', ['aegean']],
   ];
 
   for (const [code, words] of aliases) {
-    if (!AIRLINES[code]) continue;
     if (words.some((w) => text.includes(w))) return code;
   }
   return null;
+}
+
+function shouldPreferBodyDesignator(candidate, airline, flightNumber, bodyDesignator) {
+  if (!bodyDesignator) return false;
+  const rawFn = String(candidate?.flight_number || '').trim();
+  const onlyDigits = /^\d{1,4}$/.test(rawFn.replace(/\s/g, ''));
+  const noCarrier = !isValidIataCarrierCode(airline);
+  const weakPrefix = String(flightNumber || '')
+    .toUpperCase()
+    .startsWith('XX ');
+  const mismatch =
+    flightNumber &&
+    !String(flightNumber)
+      .toUpperCase()
+      .startsWith(`${bodyDesignator.carrier} `);
+  if (noCarrier || onlyDigits || weakPrefix) return true;
+  if (mismatch && rawFn.length <= 6) return true;
+  return false;
 }
 
 function extractFlightNumberFromText(text, airline) {

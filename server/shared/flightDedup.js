@@ -27,10 +27,17 @@ export function flightNumberDigits(flightNumber, airlineCode) {
 export function carrierFromFlightNumber(flightNumber, airlineCode) {
   const fn = String(flightNumber || '').trim().toUpperCase();
   const m = fn.match(/\b([A-Z]{2}|[A-Z]\d|\d[A-Z])\s*0*\d{1,4}\b/);
-  if (m) return m[1].toUpperCase();
+  if (m) {
+    const c = m[1].toUpperCase();
+    if (c === 'XX') return 'UN';
+    return c;
+  }
   const fallback = String(airlineCode || '').trim().toUpperCase();
-  if (/^[A-Z]{2}$/.test(fallback) || /^[A-Z]\d$/.test(fallback) || /^\d[A-Z]$/.test(fallback)) return fallback;
-  return 'XX';
+  if (fallback === 'XX') return 'UN';
+  if (/^[A-Z]{2}$/.test(fallback) || /^[A-Z]\d$/.test(fallback) || /^\d[A-Z]$/.test(fallback)) {
+    return fallback === 'XX' ? 'UN' : fallback;
+  }
+  return 'UN';
 }
 
 /** Canonical designator like BT282, W61234. */
