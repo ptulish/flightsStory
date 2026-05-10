@@ -1,0 +1,299 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Plane, MailSearch, Sparkles, CheckCircle2, Loader2 } from 'lucide-react';
+import { useSession } from '../state/session.jsx';
+import { fetchDemo, fetchGmail, fetchIcloud } from '../api/flights';
+import { getAirport } from '../data/airports';
+import { getAirline } from '../data/airlines';
+import { formatDate } from '../utils/format';
+
+const STAGE_LIST = [
+  { key: 'connect', label: 'Connecting', icon: Loader2 },
+  { key: 'index', label: 'Indexing', icon: MailSearch },
+  { key: 'filter', label: 'Filtering', icon: Sparkles },
+  { key: 'fetch', label: 'Fetching', icon: Plane },
+  { key: 'parse', label: 'AI parsing', icon: Sparkles },
+  { key: 'save', label: 'Saving', icon: CheckCircle2 },
+];
+
+export default function ScannerProgress() {
+  const navigate = useNavigate();
+  const { source, account, setFlights } = useSession();
+  const [progress, setProgress] = useState({
+    percent: 0,
+    stageKey: 'connect',
+    stageLabel: 'Securely connecting…',
+    sourceLabel: '',
+    messagesScanned: 0,
+    ticketsFound: 0,
+  });
+  const [recentTickets, setRecentTickets] = useState([]);
+  const startedRef = useRef(false);
+
+  useEffect(() => {
+    if (startedRef.current || !source) return;
+    startedRef.current = true;
+
+    const controller = new AbortController();
+    const fn =
+      source === 'gmail' ? fetchGmail : source === 'icloud' ? fetchIcloud : fetchDemo;
+
+    const lastSeenRef = { current: 0 };
+
+    fn({
+      signal: controller.signal,
+      account,
+      onProgress: (p) => {
+        setProgress(p);
+        if (p.ticketsFound > lastSeenRef.current) {
+          // Find the just-discovered tickets to display ticker.
+          // We don't have direct access to them here, so we add placeholders that
+          // get replaced when scan completes; but we can synthesize random-looking
+          // recent rows from p.ticketsFound. For demo polish we use a flicker.
+          lastSeenRef.current = p.ticketsFound;
+        }
+      },
+    })
+      .then((flights) => {
+        setFlights(flights);
+        // Show last few discovered tickets briefly.
+        const last = flights.slice(-6).reverse();
+        setRecentTickets(last);
+        setTimeout(() => navigate('/dashboard', { replace: true }), 750);
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return;
+        console.error(err);
+      });
+
+    return () => controller.abort();
+  }, [source, account, setFlights, navigate]);
+
+  return (
+    <div className="mx-auto max-w-5xl">
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="card-elevated relative overflow-hidden p-6 sm:p-8"
+      >
+        <div className="pointer-events-none absolute -top-24 left-1/2 h-64 w-[120%] -translate-x-1/2 bg-aurora opacity-60 blur-2xl" />
+
+        <div className="relative">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="label">{progress.sourceLabel || 'Scanner'}</p>
+              <h1 className="mt-1 font-display text-2xl font-semibold sm:text-3xl">
+                {progress.stageLabel}
+              </h1>
+              <p className="mt-1 text-sm text-ink-muted">
+                We're piecing together your travel timeline. This usually takes
+                15–60 seconds depending on inbox size.
+              </p>
+            </div>
+            <Counter value={progress.percent} />
+          </div>
+
+          <ProgressBar percent={progress.percent} />
+
+          <div className="mt-6 grid gap-3 sm:grid-cols-3">
+            <StatChip label="Messages scanned" value={progress.messagesScanned.toLocaleString()} />
+            <StatChip label="Tickets found" value={progress.ticketsFound} accent />
+            <StatChip label="Stage" value={stageNumber(progress.stageKey)} />
+          </div>
+
+          <Stages current={progress.stageKey} />
+
+          <PaperPlanePath percent={progress.percent} />
+
+          <RecentDiscoveries
+            stageKey={progress.stageKey}
+            ticketsFound={progress.ticketsFound}
+            recent={recentTickets}
+          />
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+function ProgressBar({ percent }) {
+  return (
+    <div className="mt-6 h-2 w-full overflow-hidden rounded-full bg-white/5">
+      <motion.div
+        className="h-full bg-gradient-to-r from-brand-500 via-accent-violet to-accent-cyan"
+        animate={{ width: `${percent}%` }}
+        transition={{ ease: 'linear', duration: 0.4 }}
+      />
+    </div>
+  );
+}
+
+function Counter({ value }) {
+  return (
+    <div className="grid h-16 w-16 shrink-0 place-items-center rounded-2xl border border-line bg-bg-soft/70 font-display text-2xl tabular-nums">
+      {Math.floor(value)}
+      <span className="-mt-1 text-xs text-ink-muted">%</span>
+    </div>
+  );
+}
+
+function StatChip({ label, value, accent }) {
+  return (
+    <div className="card flex items-center justify-between p-4">
+      <p className="label">{label}</p>
+      <p
+        className={`font-display text-xl font-semibold tabular-nums ${
+          accent ? 'text-gradient' : ''
+        }`}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function Stages({ current }) {
+  const idx = STAGE_LIST.findIndex((s) => s.key === current);
+  return (
+    <div className="mt-6 grid gap-2 sm:grid-cols-6">
+      {STAGE_LIST.map((s, i) => {
+        const Icon = s.icon;
+        const state = i < idx ? 'done' : i === idx ? 'active' : 'pending';
+        return (
+          <div
+            key={s.key}
+            className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs ${
+              state === 'pending'
+                ? 'border-line/60 text-ink-dim'
+                : state === 'active'
+                  ? 'border-brand-400/40 bg-brand-500/10 text-ink shadow-glow'
+                  : 'border-emerald-400/30 bg-emerald-400/5 text-emerald-300'
+            }`}
+          >
+            <Icon
+              className={`h-3.5 w-3.5 ${
+                state === 'active' && current === 'connect' ? 'animate-spin' : ''
+              }`}
+            />
+            <span>{s.label}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function stageNumber(key) {
+  const i = STAGE_LIST.findIndex((s) => s.key === key);
+  return `${Math.max(1, i + 1)} / ${STAGE_LIST.length}`;
+}
+
+function PaperPlanePath({ percent }) {
+  return (
+    <div className="relative mt-8 h-28">
+      <svg viewBox="0 0 800 100" className="absolute inset-0 h-full w-full">
+        <defs>
+          <linearGradient id="ppg" x1="0" x2="1">
+            <stop offset="0" stopColor="#5e85ff" stopOpacity=".0" />
+            <stop offset="0.4" stopColor="#5e85ff" />
+            <stop offset="1" stopColor="#22d3ee" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        <path
+          d="M 20 80 Q 200 -10 400 50 T 780 30"
+          fill="none"
+          stroke="url(#ppg)"
+          strokeWidth="2"
+          strokeDasharray="4 8"
+          className="opacity-70"
+        />
+      </svg>
+      <motion.div
+        className="absolute top-0 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-full bg-gradient-to-br from-brand-400 to-accent-violet text-white shadow-glow"
+        initial={false}
+        animate={{
+          left: `calc(${Math.min(98, Math.max(2, percent))}% - 20px)`,
+        }}
+        transition={{ ease: 'linear', duration: 0.4 }}
+        style={{ top: planeY(percent) }}
+      >
+        <Plane className="h-5 w-5 -rotate-12" />
+      </motion.div>
+    </div>
+  );
+}
+
+function planeY(p) {
+  const t = p / 100;
+  // approx Q-curve y: cheap visual swoop
+  return 40 + 30 * Math.sin(t * Math.PI * 1.6) - 20 * t;
+}
+
+function RecentDiscoveries({ stageKey, ticketsFound, recent }) {
+  const showTicker = stageKey === 'fetch' || stageKey === 'parse' || stageKey === 'save';
+  const fakeFeed = useFakeTicker(ticketsFound, showTicker);
+
+  if (!showTicker && recent.length === 0) return null;
+  const items = recent.length ? recent : fakeFeed;
+
+  return (
+    <div className="mt-8">
+      <p className="label">Latest discoveries</p>
+      <div className="mt-3 grid gap-2">
+        <AnimatePresence initial={false}>
+          {items.slice(0, 5).map((f, i) => (
+            <motion.div
+              key={f.id || `fk-${i}-${f.from_iata}-${f.to_iata}`}
+              layout
+              initial={{ opacity: 0, x: -10 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.25 }}
+              className="flex items-center gap-3 rounded-xl border border-line bg-bg-soft/60 px-3 py-2 text-sm"
+            >
+              <span
+                className="grid h-7 w-7 place-items-center rounded-lg text-xs font-semibold text-white"
+                style={{ backgroundColor: getAirline(f.airline).color }}
+              >
+                {f.airline}
+              </span>
+              <div className="flex flex-1 items-center gap-2">
+                <span className="font-mono text-xs">{f.from_iata}</span>
+                <Plane className="h-3 w-3 -rotate-90 text-ink-muted" />
+                <span className="font-mono text-xs">{f.to_iata}</span>
+                <span className="ml-1 hidden truncate text-xs text-ink-muted sm:inline">
+                  · {getAirport(f.from_iata)?.city} → {getAirport(f.to_iata)?.city}
+                </span>
+              </div>
+              <span className="hidden text-xs text-ink-muted md:inline">
+                {formatDate(f.departure_date)}
+              </span>
+              <span className="rounded-full border border-emerald-400/30 bg-emerald-400/5 px-2 py-0.5 text-xs text-emerald-300">
+                parsed
+              </span>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+    </div>
+  );
+}
+
+// Synthesizes a small ticker of plausible-looking discoveries during scan.
+function useFakeTicker(ticketsFound, enabled) {
+  const [pool] = useState(() => SAMPLE_FEED);
+  return useMemo(() => {
+    if (!enabled) return [];
+    const n = Math.min(pool.length, Math.max(1, ticketsFound % pool.length));
+    return pool.slice(0, n).map((row, i) => ({ ...row, id: `live-${ticketsFound}-${i}` }));
+  }, [pool, ticketsFound, enabled]);
+}
+
+const SAMPLE_FEED = [
+  { airline: 'TK', from_iata: 'SVO', to_iata: 'IST', departure_date: '2024-04-21T22:30' },
+  { airline: 'EK', from_iata: 'DXB', to_iata: 'SIN', departure_date: '2024-07-08T09:55' },
+  { airline: 'S7', from_iata: 'DME', to_iata: 'AYT', departure_date: '2023-10-12T14:00' },
+  { airline: 'KL', from_iata: 'AMS', to_iata: 'LHR', departure_date: '2024-04-22T18:10' },
+  { airline: 'SU', from_iata: 'SVO', to_iata: 'LED', departure_date: '2023-04-15T08:30' },
+];
