@@ -1,7 +1,7 @@
 import { getAirport } from '../data/airports';
-import { getAirline } from '../data/airlines';
 import { haversineKm } from './geo';
 import { toUSD } from './format';
+import { resolveFlightAirlineInfo, resolveCarrierCode } from './flightDisplay';
 
 // Decorate a raw flight with derived geometry/distance/airline data so all
 // downstream components consume the same shape.
@@ -9,7 +9,7 @@ export function enrichFlight(flight) {
   const from = getAirport(flight.from_iata);
   const to = getAirport(flight.to_iata);
   const distance_km = from && to ? haversineKm(from, to) : 0;
-  const airline = getAirline(flight.airline);
+  const airline = resolveFlightAirlineInfo(flight);
   return {
     ...flight,
     from,
@@ -53,7 +53,7 @@ export function computeStats(flights) {
   // Airlines
   const airlineMap = new Map();
   enriched.forEach((f) => {
-    const k = f.airline;
+    const k = resolveCarrierCode(f);
     const cur = airlineMap.get(k) || { ...f.airline_info, count: 0, distance_km: 0 };
     cur.count += 1;
     cur.distance_km += f.distance_km;

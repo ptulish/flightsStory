@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import pg from 'pg';
 import { env } from './shared/env.js';
+import { computeFlightDedupKey } from './shared/flightDedup.js';
 
 const { Pool } = pg;
 
@@ -52,6 +53,50 @@ export async function ensureSchema() {
 
     CREATE INDEX IF NOT EXISTS flights_user_idx ON flights(user_id, departure_date DESC);
   `);
+  await migrateFlightDedupSchema();
+}
+
+/** One flight per user even if booking + check-in + delay emails share the same segment. */
+async function migrateFlightDedupSchema() {
+  await pool.query(`ALTER TABLE flights ADD COLUMN IF NOT EXISTS dedup_key TEXT`);
+
+  for (;;) {
+    const { rows } = await pool.query(
+      `SELECT id, user_id, airline, flight_number, from_iata, to_iata, departure_date
+       FROM flights WHERE dedup_key IS NULL LIMIT 400`,
+    );
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      const key = computeFlightDedupKey(row.user_id, row);
+      await pool.query(`UPDATE flights SET dedup_key = $1 WHERE id = $2`, [key, row.id]);
+    }
+  }
+
+  await pool.query(`
+    DELETE FROM flights
+    WHERE id IN (
+      SELECT id FROM (
+        SELECT id,
+          ROW_NUMBER() OVER (
+            PARTITION BY user_id, dedup_key
+            ORDER BY created_at ASC NULLS LAST, id ASC
+          ) AS rn
+        FROM flights
+        WHERE dedup_key IS NOT NULL
+      ) t
+      WHERE rn > 1
+    )
+  `);
+
+  await pool.query(
+    `ALTER TABLE flights DROP CONSTRAINT IF EXISTS flights_user_id_source_message_hash_key`,
+  );
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS flights_user_dedup_idx ON flights (user_id, dedup_key)
+  `);
+
+  await pool.query(`ALTER TABLE flights ALTER COLUMN dedup_key SET NOT NULL`);
 }
 
 export async function upsertUser({ email, displayName, authType }) {
@@ -117,14 +162,15 @@ export async function getUserById(userId) {
 
 export async function storeFlight(userId, source, messageHash, flight, rawPayload) {
   const id = crypto.randomUUID();
+  const dedupKey = computeFlightDedupKey(userId, flight);
   const { rows } = await pool.query(
     `
       INSERT INTO flights (
-        id, user_id, source, message_hash, airline, flight_number, from_iata, to_iata,
+        id, user_id, source, message_hash, dedup_key, airline, flight_number, from_iata, to_iata,
         departure_date, duration_min, price, currency, cabin, raw_subject, raw_payload
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-      ON CONFLICT (user_id, source, message_hash) DO NOTHING
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+      ON CONFLICT (user_id, dedup_key) DO NOTHING
       RETURNING id
     `,
     [
@@ -132,6 +178,7 @@ export async function storeFlight(userId, source, messageHash, flight, rawPayloa
       userId,
       source,
       messageHash,
+      dedupKey,
       flight.airline,
       flight.flight_number,
       flight.from_iata,
@@ -170,7 +217,8 @@ export async function listFlights(userId, source) {
         currency,
         cabin,
         source,
-        raw_subject
+        raw_subject,
+        raw_payload
       FROM flights
       WHERE ${where}
       ORDER BY departure_date DESC

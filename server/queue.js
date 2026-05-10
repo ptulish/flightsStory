@@ -49,6 +49,8 @@ export function createParserWorker() {
         {
           subject: job.data.subject,
           receivedAt: job.data.receivedAt,
+          messageId: job.data.messageId ?? null,
+          internalDateMs: job.data.internalDateMs ?? null,
         },
       );
 

@@ -42,6 +42,12 @@ export default function FlightMap({ stats, height = 480 }) {
       zoom: Math.max(0.7, Math.min(6, p.zoom + delta)),
     }));
 
+  const zoomK = Math.max(0.7, position.zoom);
+  // Labels live inside ZoomableGroup, so keep text visually stable on screen.
+  const labelFontPx = clamp(6.4, 9.5, 8.2 / Math.pow(zoomK, 0.9));
+  const labelStrokePx = clamp(0.8, 2, 1.8 / Math.pow(zoomK, 0.88));
+  const labelYOffset = (radius) => -(radius + 4.8) / Math.pow(zoomK, 0.92);
+
   return (
     <div ref={wrapRef} className="card relative overflow-hidden p-0" style={{ height }}>
       {/* Header */}
@@ -153,17 +159,20 @@ export default function FlightMap({ stats, height = 480 }) {
                 stroke={COLORS.markerStroke}
                 strokeWidth={1}
               />
-              {m.radius >= 3 && (
+              {(m.radius >= 4.2 || zoomK > 1.35) && (
                 <text
                   textAnchor="middle"
-                  y={-(m.radius + 5)}
+                  y={labelYOffset(m.radius)}
                   className="font-mono"
                   style={{
-                    fontSize: 8,
+                    fontSize: labelFontPx,
                     fill: '#cdd6f5',
+                    fillOpacity: clamp(0.62, 0.98, 0.6 + zoomK * 0.18),
                     paintOrder: 'stroke',
                     stroke: '#0a0e1a',
-                    strokeWidth: 2,
+                    strokeWidth: labelStrokePx,
+                    letterSpacing: 0.4 / Math.pow(zoomK, 0.5),
+                    transition: 'font-size 120ms ease, stroke-width 120ms ease, fill-opacity 120ms ease',
                   }}
                 >
                   {m.iata}
@@ -285,6 +294,10 @@ function pickRouteColor(route) {
   // Boost prominent routes toward the bright brand-cyan.
   if (route.count >= 6) return '#22d3ee';
   return palette[Math.abs(hash) % palette.length];
+}
+
+function clamp(min, max, value) {
+  return Math.min(max, Math.max(min, value));
 }
 
 // Re-export for tests / imports elsewhere

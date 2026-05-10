@@ -5,6 +5,7 @@ import { useSession } from '../state/session.jsx';
 import { computeStats } from '../utils/stats';
 import TicketList from '../components/TicketList.jsx';
 import { formatNumber, formatKm, formatCurrency } from '../utils/format';
+import { displayFlightNumberDigits } from '../utils/flightDisplay';
 
 export default function Tickets() {
   const { flights } = useSession();
@@ -16,7 +17,7 @@ export default function Tickets() {
       ...stats.flights.map((f) => [
         f.departure_date,
         f.airline_info.name,
-        f.flight_number,
+        displayFlightNumberDigits(f),
         `${f.from?.city || f.from_iata} (${f.from_iata})`,
         `${f.to?.city || f.to_iata} (${f.to_iata})`,
         Math.round(f.distance_km),

@@ -4,9 +4,85 @@ import { env } from '../shared/env.js';
 import { getJsonCache, setJsonCache } from '../cache.js';
 
 const IATA_RE = /\b[A-Z]{3}\b/g;
-const AIRLINE_RE = /\b([A-Z0-9]{2,3})\s?(\d{1,4})\b/;
+/** IATA carrier + flight number only (no purely numeric "airline" like 202). */
+const AIRLINE_RE = /\b([A-Z]{2}|[A-Z]\d|\d[A-Z])\s*0*(\d{1,4})\b/;
 const PRICE_RE = /\b(?:USD|EUR|GBP|RUB|\$|€|£)\s?(\d+(?:[.,]\d{1,2})?)\b/i;
-const ISO_DATE_RE = /\b(20\d{2}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?\b/;
+
+const MONTHS = {
+  jan: 1,
+  january: 1,
+  feb: 2,
+  february: 2,
+  mar: 3,
+  march: 3,
+  apr: 4,
+  april: 4,
+  may: 5,
+  jun: 6,
+  june: 6,
+  jul: 7,
+  july: 7,
+  aug: 8,
+  august: 8,
+  sep: 9,
+  sept: 9,
+  september: 9,
+  oct: 10,
+  october: 10,
+  nov: 11,
+  november: 11,
+  dec: 12,
+  december: 12,
+};
+
+/** First match wins. Never returns "now" — avoids fake identical timestamps. */
+function extractDepartureDateString(text) {
+  if (!text) return null;
+
+  let m = text.match(/\b(20\d{2})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?\b/);
+  if (m) {
+    const t = m[4] && m[5] ? `${m[4]}:${m[5]}` : '12:00';
+    return `${m[1]}-${m[2]}-${m[3]}T${t}`;
+  }
+
+  m = text.match(/\b(\d{1,2})\.(\d{1,2})\.(20\d{2})\b/);
+  if (m) {
+    const dd = m[1].padStart(2, '0');
+    const mo = m[2].padStart(2, '0');
+    return `${m[3]}-${mo}-${dd}T12:00`;
+  }
+
+  m = text.match(/\b(\d{1,2})[/\-](\d{1,2})[/\-](20\d{2})\b/);
+  if (m) {
+    const dd = m[1].padStart(2, '0');
+    const mo = m[2].padStart(2, '0');
+    return `${m[3]}-${mo}-${dd}T12:00`;
+  }
+
+  m = text.match(
+    /\b(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})\b|\b([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(20\d{2})\b/,
+  );
+  if (m) {
+    let day;
+    let monToken;
+    let year;
+    if (m[1]) {
+      day = m[1].padStart(2, '0');
+      monToken = m[2].toLowerCase();
+      year = m[3];
+    } else {
+      monToken = m[4].toLowerCase();
+      day = m[5].padStart(2, '0');
+      year = m[6];
+    }
+    const mon = MONTHS[monToken] ?? MONTHS[monToken.slice(0, 3)];
+    if (!mon) return null;
+    const mo = String(mon).padStart(2, '0');
+    return `${year}-${mo}-${day}T12:00`;
+  }
+
+  return null;
+}
 
 export async function parseFlightFromEmail(message) {
   const llmParsed = await parseViaGemini(message);
@@ -17,10 +93,18 @@ export async function parseFlightFromEmail(message) {
   const to = await resolveAirport(candidate.to_iata);
   if (!from || !to) return null;
 
-  const airline = normalizeAirline(candidate.airline);
+  let airline = normalizeAirline(candidate.airline);
+  if (!isValidIataCarrierCode(airline)) {
+    airline = carrierPrefixFromFlightNumber(candidate.flight_number);
+  }
+  if (!isValidIataCarrierCode(airline)) {
+    airline = carrierPrefixFromFlightNumber(candidate.airline);
+  }
+  if (!isValidIataCarrierCode(airline)) return null;
+
   const flightNumber = normalizeFlightNumber(candidate.flight_number, airline);
   const departureDate = normalizeDepartureDate(candidate.departure_date);
-  if (!airline || !flightNumber || !departureDate) return null;
+  if (!flightNumber || !departureDate) return null;
 
   return {
     id: crypto.randomUUID(),
@@ -58,13 +142,12 @@ function parseHeuristically({ subject, bodyText }) {
 
   const airlineMatch = text.match(AIRLINE_RE);
   const priceMatch = text.match(PRICE_RE);
-  const dateMatch = text.match(ISO_DATE_RE);
+  const date = extractDepartureDateString(text);
+  if (!date || !airlineMatch) return null;
 
-  const airline = airlineMatch?.[1] || 'UN';
-  const num = airlineMatch?.[2] || '0001';
-  const date = dateMatch
-    ? `${dateMatch[1]}T${dateMatch[2] || '09:00'}`
-    : new Date().toISOString().slice(0, 16);
+  const airline = carrierPrefixFromFlightNumber(airlineMatch[0]);
+  if (!isValidIataCarrierCode(airline)) return null;
+  const num = airlineMatch[2];
 
   let currency = 'USD';
   if (priceMatch?.[0]?.includes('EUR') || priceMatch?.[0]?.includes('€')) currency = 'EUR';
@@ -88,9 +171,15 @@ async function parseViaGemini({ subject, bodyText }) {
   if (!env.GEMINI_API_KEY) return null;
   const prompt = `
 Extract one primary flight from this email into strict JSON.
-Return ONLY JSON object with keys:
+Return ONLY a JSON object with keys:
 airline, flight_number, from_iata, to_iata, departure_date, duration_min, price, currency, cabin.
-If you cannot find flight, return {}.
+
+Rules:
+- airline MUST be the 2-character IATA airline designator only (examples: LH, BT, FR, W6, TK, QR). Never a flight number, never three digits, never a long word.
+- flight_number MUST look like "LH 410" or "BT 282" (carrier space digits).
+- from_iata, to_iata: 3-letter IATA airport codes only.
+- departure_date: scheduled departure in ISO 8601 from the itinerary. Do NOT use today's date. If unknown, return {}.
+- If you cannot identify a real commercial flight in this email, return {}.
 
 Subject: ${subject || ''}
 
@@ -110,19 +199,57 @@ ${(bodyText || '').slice(0, 12000)}
 
   if (!res.ok) return null;
   const payload = await res.json();
-  const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+  const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  const parsed = extractJsonObjectFromModelText(text);
+  return parsed && Object.keys(parsed).length ? parsed : null;
+}
+
+/** Gemini sometimes wraps JSON in markdown despite responseMimeType. */
+function extractJsonObjectFromModelText(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  let t = raw.trim();
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) t = fence[1].trim();
+  const start = t.indexOf('{');
+  const end = t.lastIndexOf('}');
+  if (start >= 0 && end > start) t = t.slice(start, end + 1);
   try {
-    const parsed = JSON.parse(text);
-    return parsed && Object.keys(parsed).length ? parsed : null;
+    return JSON.parse(t);
   } catch {
     return null;
   }
 }
 
+/** IATA airline designator: two chars; reject numeric-only (e.g. "37", "202"). */
+function isValidIataCarrierCode(code) {
+  if (!code || typeof code !== 'string') return false;
+  const c = code.trim().toUpperCase();
+  if (c.length !== 2) return false;
+  if (/^\d{2}$/.test(c)) return false;
+  return /^[A-Z0-9]{2}$/.test(c);
+}
+
+/** Pull "BT" from "BT 282", "LH410", "6E 123". */
+function carrierPrefixFromFlightNumber(value) {
+  const v = String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, ' ');
+  const m = v.match(/^([A-Z]{2}|[A-Z]\d|\d[A-Z])\s*0*(\d{1,4})\b/);
+  if (m && isValidIataCarrierCode(m[1])) return m[1];
+  const m2 = v.match(/^([A-Z]{2}|[A-Z]\d|\d[A-Z])\d{2,4}\b/);
+  if (m2 && isValidIataCarrierCode(m2[1])) return m2[1];
+  return null;
+}
+
 function normalizeAirline(value) {
   const v = String(value || '').trim().toUpperCase();
   if (!v) return null;
-  return v.split(' ')[0].slice(0, 3);
+  const fromWord = v.match(/\b([A-Z]{2}|[A-Z]\d|\d[A-Z])\b/);
+  if (fromWord && isValidIataCarrierCode(fromWord[1])) return fromWord[1];
+  if (v.length >= 2 && /^[A-Z]{2}/.test(v) && isValidIataCarrierCode(v.slice(0, 2))) return v.slice(0, 2);
+  const fromFn = carrierPrefixFromFlightNumber(v);
+  return fromFn;
 }
 
 function normalizeFlightNumber(value, airline) {

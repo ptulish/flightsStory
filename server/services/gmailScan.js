@@ -65,6 +65,7 @@ export async function runGmailScan({ userId, res, req }) {
     const headers = Object.fromEntries((payload?.headers || []).map((h) => [h.name, h.value || '']));
     const subject = headers.Subject || '';
     const date = headers.Date || full.data.internalDate || '';
+    const internalDateMs = full.data.internalDate ? Number(full.data.internalDate) : null;
     const bodyText = toPlainText(decodeGmailBody(payload));
     const messageHash = toMessageHash('gmail', msg.id, subject, date);
 
@@ -76,6 +77,7 @@ export async function runGmailScan({ userId, res, req }) {
       subject,
       bodyText,
       receivedAt: date,
+      internalDateMs,
     });
 
     emitStageProgress(

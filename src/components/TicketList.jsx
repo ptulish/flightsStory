@@ -19,6 +19,7 @@ import {
   formatDuration,
   formatKm,
 } from '../utils/format';
+import { displayFlightNumberDigits, resolveCarrierCode } from '../utils/flightDisplay';
 
 export default function TicketList({
   flights,
@@ -39,7 +40,11 @@ export default function TicketList({
   );
   const airlines = useMemo(() => {
     const set = new Map();
-    flights.forEach((f) => set.set(f.airline, getAirline(f.airline).name));
+    flights.forEach((f) => {
+      const code = f.airline_info?.code ?? resolveCarrierCode(f);
+      const name = f.airline_info?.name ?? getAirline(code).name;
+      set.set(code, name);
+    });
     return [...set.entries()].sort((a, b) => a[1].localeCompare(b[1]));
   }, [flights]);
   const cabins = useMemo(
@@ -51,7 +56,8 @@ export default function TicketList({
     const needle = search.trim().toLowerCase();
     return flights.filter((f) => {
       if (year !== 'all' && f.year !== Number(year)) return false;
-      if (airline !== 'all' && f.airline !== airline) return false;
+      if (airline !== 'all' && (f.airline_info?.code ?? resolveCarrierCode(f)) !== airline)
+        return false;
       if (cabin !== 'all' && (f.cabin || 'economy') !== cabin) return false;
       if (!needle) return true;
       const haystack = [
@@ -62,7 +68,9 @@ export default function TicketList({
         f.to?.city,
         f.to?.country,
         f.airline_info?.name,
+        f.airline_info?.code,
         f.flight_number,
+        displayFlightNumberDigits(f),
       ]
         .filter(Boolean)
         .join(' ')
@@ -189,7 +197,8 @@ function Row({ flight, index, compact }) {
   const [open, setOpen] = useState(false);
   const from = flight.from || getAirport(flight.from_iata);
   const to = flight.to || getAirport(flight.to_iata);
-  const airline = flight.airline_info || getAirline(flight.airline);
+  const airline = flight.airline_info || getAirline(resolveCarrierCode(flight));
+  const flightNo = displayFlightNumberDigits(flight);
 
   return (
     <motion.div
@@ -217,8 +226,11 @@ function Row({ flight, index, compact }) {
               {from?.city || flight.from_iata} → {to?.city || flight.to_iata}
             </p>
             <p className="truncate text-xs text-ink-muted">
-              {formatDate(flight.departure_date)} · {airline.name}
+              {formatDate(flight.departure_date)}
+              {flight.departure_date ? ` · ${formatTime(flight.departure_date)}` : ''}
             </p>
+            <p className="truncate text-sm font-medium leading-tight">{airline.name}</p>
+            <p className="font-mono text-xs text-ink-muted tabular-nums">{flightNo}</p>
           </div>
           <div className="hidden md:block">
             <p className="text-sm font-medium tabular-nums">
@@ -229,9 +241,9 @@ function Row({ flight, index, compact }) {
         </div>
 
         {/* Airline (md+) */}
-        <div className="col-span-2 hidden md:block">
-          <p className="truncate text-sm">{airline.name}</p>
-          <p className="font-mono text-xs text-ink-muted">{flight.flight_number}</p>
+        <div className="col-span-2 hidden flex-col justify-center md:flex">
+          <p className="truncate text-sm font-medium leading-snug">{airline.name}</p>
+          <p className="font-mono text-xs text-ink-muted tabular-nums">{flightNo}</p>
         </div>
 
         {/* Route (md+) */}
@@ -280,6 +292,21 @@ function Row({ flight, index, compact }) {
                 <p className="truncate font-mono text-xs text-ink-muted">
                   {flight.raw_subject}
                 </p>
+                {flight.source === 'gmail' && flight.raw_subject && (
+                  <a
+                    href={`https://mail.google.com/mail/u/0/#search/${encodeURIComponent(flight.raw_subject)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-2 inline-block text-xs text-brand-300 underline-offset-2 hover:underline"
+                  >
+                    Search this subject in Gmail
+                  </a>
+                )}
+                {flight.source === 'gmail' && flight.raw_payload?.messageId && (
+                  <p className="mt-1 break-all font-mono text-[10px] text-ink-dim">
+                    Gmail message id: {flight.raw_payload.messageId}
+                  </p>
+                )}
               </Detail>
               <Detail label="From">
                 <p className="text-sm">
