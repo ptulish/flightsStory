@@ -1,19 +1,26 @@
+# Free-tier test stack on Render (see https://render.com/docs/free)
+# - Web: plan free (spins down after ~15 min idle; cold start ~1 min)
+# - No separate Background Worker: workers are NOT free on Render — use INLINE_WORKER on the web service
+# - Postgres + Key Value: plan free (Postgres free DB may expire after ~30 days — check Render docs)
+
 services:
-  # Redis-compatible cache/queue (NOT under `databases:` — that list is Postgres-only)
   - type: keyvalue
     name: skyhistory-redis
     ipAllowList: []
+    plan: free
+    maxmemoryPolicy: allkeys-lru
 
   - type: web
     name: skyhistory-api
     runtime: node
+    plan: free
     buildCommand: npm install
     startCommand: npm run start:api
     envVars:
       - key: NODE_ENV
         value: production
       - key: INLINE_WORKER
-        value: "false"
+        value: "true"
       - key: FRONTEND_ORIGIN
         sync: false
       - key: CORS_ORIGINS
@@ -38,32 +45,7 @@ services:
           name: skyhistory-redis
           property: connectionString
 
-  - type: worker
-    name: skyhistory-worker
-    runtime: node
-    buildCommand: npm install
-    startCommand: npm run start:worker
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: FRONTEND_ORIGIN
-        sync: false
-      - key: CORS_ORIGINS
-        sync: false
-      - key: APP_JWT_SECRET
-        sync: false
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: DATABASE_URL
-        fromDatabase:
-          name: skyhistory-postgres
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: skyhistory-redis
-          property: connectionString
-
 databases:
   - name: skyhistory-postgres
     databaseName: skyhistory
+    plan: free

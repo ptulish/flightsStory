@@ -3,9 +3,16 @@
 This project is split into:
 
 - React frontend on Netlify
-- API server on Render/Railway
-- Queue worker on Render/Railway
-- Postgres + Redis
+- API on Render (optional: inline queue worker on the same instance for **free** tier)
+- Postgres + Redis-compatible Key Value on Render
+
+## Free test on Render
+
+`render.yaml` is set up for **Render free tier**: `plan: free` on web, Postgres, and Key Value. There is **no** separate Background Worker (paid only) — parsing runs inside the API via `INLINE_WORKER=true`.
+
+Limitations: free web **spins down** after idle time; first request after sleep is slow. Free Postgres may **expire** after a limited period (see [Render free docs](https://render.com/docs/free)).
+
+If Blueprint still shows paid resources, delete the draft deploy and pull the latest `render.yaml`, or remove old paid services from the same Blueprint name.
 
 ## 1) Local smoke test
 
