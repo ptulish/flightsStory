@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { AIRPORTS } from '../../src/data/airports.js';
+import { AIRLINES } from '../../src/data/airlines.js';
 import { env } from '../shared/env.js';
 import { getJsonCache, setJsonCache } from '../cache.js';
 
@@ -38,7 +39,15 @@ const MONTHS = {
 /** First match wins. Never returns "now" — avoids fake identical timestamps. */
 function extractDepartureDateString(text) {
   if (!text) return null;
+  const lines = String(text).split(/\r?\n/);
+  const focused = lines
+    .filter((line) => /\b(depart|departure|flight|itinerary|outbound|takeoff|arrival|route)\b/i.test(line))
+    .join('\n');
+  return extractDepartureDateFromChunk(focused) || extractDepartureDateFromChunk(text);
+}
 
+function extractDepartureDateFromChunk(text) {
+  if (!text) return null;
   let m = text.match(/\b(20\d{2})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?\b/);
   if (m) {
     const t = m[4] && m[5] ? `${m[4]}:${m[5]}` : '12:00';
@@ -99,6 +108,9 @@ export async function parseFlightFromEmail(message) {
   }
   if (!isValidIataCarrierCode(airline)) {
     airline = carrierPrefixFromFlightNumber(candidate.airline);
+  }
+  if (!isValidIataCarrierCode(airline)) {
+    airline = inferAirlineFromText(message.subject, message.bodyText);
   }
   if (!isValidIataCarrierCode(airline)) return null;
 
@@ -254,9 +266,10 @@ function normalizeAirline(value) {
 
 function normalizeFlightNumber(value, airline) {
   const v = String(value || '').trim();
-  if (!v) return `${airline} 0001`;
+  if (!v) return null;
   if (/^[A-Z0-9]{2,3}\s+\d{1,4}$/i.test(v)) return v.toUpperCase();
-  const digits = (v.match(/\d{1,4}/) || ['0001'])[0];
+  const digits = (v.match(/\d{1,4}/) || [null])[0];
+  if (!digits) return null;
   return `${airline} ${digits}`;
 }
 
@@ -264,6 +277,8 @@ function normalizeDepartureDate(value) {
   if (!value) return null;
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return null;
+  const y = parsed.getUTCFullYear();
+  if (y < 2000 || y > 2100) return null;
   return parsed.toISOString();
 }
 
@@ -290,4 +305,31 @@ function asOptionalNumber(value) {
   if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+function inferAirlineFromText(subject, bodyText) {
+  const text = `${subject || ''}\n${bodyText || ''}`.toLowerCase();
+  if (!text.trim()) return null;
+
+  const aliases = [
+    ['LH', ['lufthansa']],
+    ['BT', ['airbaltic', 'air baltic']],
+    ['FR', ['ryanair']],
+    ['W6', ['wizz', 'wizzair', 'wizz air']],
+    ['U2', ['easyjet', 'easy jet']],
+    ['SU', ['aeroflot']],
+    ['TK', ['turkish airlines', 'turkish']],
+    ['PC', ['pegasus']],
+    ['KL', ['klm']],
+    ['AF', ['air france']],
+    ['BA', ['british airways']],
+    ['EK', ['emirates']],
+    ['QR', ['qatar airways', 'qatar']],
+  ];
+
+  for (const [code, words] of aliases) {
+    if (!AIRLINES[code]) continue;
+    if (words.some((w) => text.includes(w))) return code;
+  }
+  return null;
 }

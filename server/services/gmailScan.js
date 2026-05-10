@@ -130,5 +130,7 @@ function emitStageProgress(res, stageIdx, step, totalSteps, sourceLabel, message
     sourceLabel,
     messagesScanned,
     ticketsFound,
+    stageStep: step,
+    stageTotalSteps: totalSteps,
   });
 }

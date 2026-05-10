@@ -36,6 +36,6 @@ export function computeFlightDedupKey(userId, flight) {
   const to = String(flight.to_iata || '').trim().toUpperCase();
   const d = new Date(flight.departure_date);
   const slot = Number.isNaN(d.getTime()) ? 'invalid-date' : d.toISOString().slice(0, 13);
-  const raw = `${userId}|${airline}|${digits}|${from}|${to}|${slot}`;
+  const raw = `${userId}|${digits}|${from}|${to}|${slot}`;
   return crypto.createHash('sha256').update(raw).digest('hex');
 }

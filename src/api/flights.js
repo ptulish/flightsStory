@@ -81,6 +81,8 @@ async function runScan({ onProgress, signal, flights, sourceLabel, fakeMessages 
         sourceLabel,
         messagesScanned: Math.round(fakeMessages * (percent / 100)),
         ticketsFound: counter,
+        stageStep: s + 1,
+        stageTotalSteps: stageSteps,
       });
 
       await sleep(60 + Math.random() * 60);
@@ -99,6 +101,8 @@ async function runScan({ onProgress, signal, flights, sourceLabel, fakeMessages 
     sourceLabel,
     messagesScanned: fakeMessages,
     ticketsFound: found.length,
+    stageStep: 1,
+    stageTotalSteps: 1,
   });
 
   return found;

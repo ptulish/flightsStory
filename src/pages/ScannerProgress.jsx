@@ -20,6 +20,9 @@ const STAGE_LIST = [
 export default function ScannerProgress() {
   const navigate = useNavigate();
   const { source, account, setFlights } = useSession();
+  const [startedAt, setStartedAt] = useState(() => Date.now());
+  const [lastEventAt, setLastEventAt] = useState(() => Date.now());
+  const [nowTs, setNowTs] = useState(() => Date.now());
   const [progress, setProgress] = useState({
     percent: 0,
     stageKey: 'connect',
@@ -27,6 +30,8 @@ export default function ScannerProgress() {
     sourceLabel: '',
     messagesScanned: 0,
     ticketsFound: 0,
+    stageStep: 0,
+    stageTotalSteps: 0,
   });
   const [recentTickets, setRecentTickets] = useState([]);
   const startedRef = useRef(false);
@@ -34,6 +39,8 @@ export default function ScannerProgress() {
   useEffect(() => {
     if (startedRef.current || !source) return;
     startedRef.current = true;
+    setStartedAt(Date.now());
+    setLastEventAt(Date.now());
 
     const controller = new AbortController();
     const fn =
@@ -46,6 +53,7 @@ export default function ScannerProgress() {
       account,
       onProgress: (p) => {
         setProgress(p);
+        setLastEventAt(Date.now());
         if (p.ticketsFound > lastSeenRef.current) {
           // Find the just-discovered tickets to display ticker.
           // We don't have direct access to them here, so we add placeholders that
@@ -70,6 +78,15 @@ export default function ScannerProgress() {
     return () => controller.abort();
   }, [source, account, setFlights, navigate]);
 
+  useEffect(() => {
+    const t = setInterval(() => setNowTs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const isActive = progress.stageKey !== 'done';
+  const elapsedSec = Math.max(0, Math.floor((nowTs - startedAt) / 1000));
+  const sinceLastEventSec = Math.max(0, Math.floor((nowTs - lastEventAt) / 1000));
+
   return (
     <div className="mx-auto max-w-5xl">
       <motion.div
@@ -90,11 +107,19 @@ export default function ScannerProgress() {
                 We're piecing together your travel timeline. This usually takes
                 15–60 seconds depending on inbox size.
               </p>
+              <LiveScanStatus
+                active={isActive}
+                stageKey={progress.stageKey}
+                elapsedSec={elapsedSec}
+                sinceLastEventSec={sinceLastEventSec}
+                stageStep={progress.stageStep}
+                stageTotalSteps={progress.stageTotalSteps}
+              />
             </div>
             <Counter value={progress.percent} />
           </div>
 
-          <ProgressBar percent={progress.percent} />
+          <ProgressBar percent={progress.percent} active={isActive} />
 
           <div className="mt-6 grid gap-3 sm:grid-cols-3">
             <StatChip label="Messages scanned" value={progress.messagesScanned.toLocaleString()} />
@@ -117,14 +142,21 @@ export default function ScannerProgress() {
   );
 }
 
-function ProgressBar({ percent }) {
+function ProgressBar({ percent, active }) {
   return (
-    <div className="mt-6 h-2 w-full overflow-hidden rounded-full bg-white/5">
+    <div className="relative mt-6 h-2 w-full overflow-hidden rounded-full bg-white/5">
       <motion.div
         className="h-full bg-gradient-to-r from-brand-500 via-accent-violet to-accent-cyan"
         animate={{ width: `${percent}%` }}
         transition={{ ease: 'linear', duration: 0.4 }}
       />
+      {active && (
+        <motion.div
+          className="absolute inset-y-0 h-2 w-1/3 bg-gradient-to-r from-transparent via-white/35 to-transparent"
+          animate={{ x: ['-40%', '340%'] }}
+          transition={{ duration: 1.3, repeat: Infinity, ease: 'linear' }}
+        />
+      )}
     </div>
   );
 }
@@ -173,13 +205,58 @@ function Stages({ current }) {
           >
             <Icon
               className={`h-3.5 w-3.5 ${
-                state === 'active' && current === 'connect' ? 'animate-spin' : ''
+                state === 'active' && current === 'connect'
+                  ? 'animate-spin'
+                  : state === 'active'
+                    ? 'animate-pulse'
+                    : ''
               }`}
             />
             <span>{s.label}</span>
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function LiveScanStatus({ active, stageKey, elapsedSec, sinceLastEventSec, stageStep, stageTotalSteps }) {
+  if (!active) return null;
+  const busyLabel =
+    stageKey === 'fetch'
+      ? 'Fetching emails'
+      : stageKey === 'filter'
+        ? 'Filtering candidates'
+        : stageKey === 'parse'
+          ? 'Parsing flights with AI'
+          : 'Processing';
+  const canShowEmailOrdinal =
+    (stageKey === 'fetch' || stageKey === 'parse') &&
+    Number.isFinite(stageTotalSteps) &&
+    stageTotalSteps > 1;
+  const emailCurrent = Math.min(stageTotalSteps, Math.max(1, stageStep || 1));
+
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-ink-muted">
+      <span className="inline-flex items-center gap-2 rounded-full border border-line/70 bg-bg-soft/70 px-2.5 py-1">
+        <motion.span
+          className="h-1.5 w-1.5 rounded-full bg-emerald-300"
+          animate={{ opacity: [0.35, 1, 0.35], scale: [0.9, 1.15, 0.9] }}
+          transition={{ duration: 1.1, repeat: Infinity, ease: 'easeInOut' }}
+        />
+        {busyLabel}
+      </span>
+      <span className="rounded-full border border-line/60 bg-bg-soft/50 px-2.5 py-1">
+        elapsed {formatDurationShort(elapsedSec)}
+      </span>
+      <span className="rounded-full border border-line/60 bg-bg-soft/50 px-2.5 py-1">
+        last update {sinceLastEventSec}s ago
+      </span>
+      {canShowEmailOrdinal && (
+        <span className="rounded-full border border-brand-400/30 bg-brand-500/10 px-2.5 py-1 text-ink">
+          email {emailCurrent.toLocaleString()} / {stageTotalSteps.toLocaleString()}
+        </span>
+      )}
     </div>
   );
 }
@@ -228,6 +305,12 @@ function planeY(p) {
   const t = p / 100;
   // approx Q-curve y: cheap visual swoop
   return 40 + 30 * Math.sin(t * Math.PI * 1.6) - 20 * t;
+}
+
+function formatDurationShort(totalSec) {
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
 function RecentDiscoveries({ stageKey, ticketsFound, recent }) {

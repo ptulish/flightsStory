@@ -60,14 +60,13 @@ export async function ensureSchema() {
 async function migrateFlightDedupSchema() {
   await pool.query(`ALTER TABLE flights ADD COLUMN IF NOT EXISTS dedup_key TEXT`);
 
-  for (;;) {
-    const { rows } = await pool.query(
-      `SELECT id, user_id, airline, flight_number, from_iata, to_iata, departure_date
-       FROM flights WHERE dedup_key IS NULL LIMIT 400`,
-    );
-    if (rows.length === 0) break;
-    for (const row of rows) {
-      const key = computeFlightDedupKey(row.user_id, row);
+  const { rows } = await pool.query(
+    `SELECT id, user_id, dedup_key, airline, flight_number, from_iata, to_iata, departure_date
+     FROM flights`,
+  );
+  for (const row of rows) {
+    const key = computeFlightDedupKey(row.user_id, row);
+    if (row.dedup_key !== key) {
       await pool.query(`UPDATE flights SET dedup_key = $1 WHERE id = $2`, [key, row.id]);
     }
   }

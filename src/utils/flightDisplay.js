@@ -30,8 +30,7 @@ export function resolveCarrierCode(flight) {
   if (fromAirline) return fromAirline;
   const fromFlight = carrierFromMessyString(flight?.flight_number);
   if (fromFlight) return fromFlight;
-  if (a.length === 2 && /^[A-Z0-9]{2}$/.test(a) && !/^\d{2}$/.test(a)) return a;
-  return a.slice(0, 2) || 'XX';
+  return 'XX';
 }
 
 export function resolveFlightAirlineInfo(flight) {
