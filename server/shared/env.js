@@ -48,6 +48,6 @@ export const env = {
     data.GOOGLE_REDIRECT_URI || `http://localhost:${data.PORT}/api/auth/google/callback`,
   CORS_ORIGINS: (data.CORS_ORIGINS || data.FRONTEND_ORIGIN)
     .split(',')
-    .map((v) => v.trim())
+    .map((v) => v.trim().replace(/\/$/, ''))
     .filter(Boolean),
 };

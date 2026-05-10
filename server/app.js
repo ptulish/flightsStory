@@ -30,24 +30,44 @@ export async function createApp() {
 
   const app = express();
   app.disable('x-powered-by');
+
+  // Explicit OPTIONS first — avoids edge cases between pino-http / helmet and cors preflight.
+  app.use((req, res, next) => {
+    if (req.method !== 'OPTIONS') return next();
+    const origin = req.headers.origin;
+    const allowed = env.CORS_ORIGINS;
+    const isAllowed =
+      !allowed.length || !origin || allowed.includes(String(origin).replace(/\/$/, ''));
+    if (!isAllowed) {
+      return res.status(403).json({ error: 'CORS origin not allowed' });
+    }
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    const reqHdrs = req.headers['access-control-request-headers'];
+    res.setHeader('Access-Control-Allow-Headers', reqHdrs || 'Content-Type, Authorization, Accept');
+    res.setHeader('Access-Control-Max-Age', '86400');
+    return res.status(204).end();
+  });
+
   app.use(httpLogger);
-  app.use(helmet());
   app.use(
     cors({
-      origin(origin, cb) {
-        if (!origin || env.CORS_ORIGINS.includes(origin)) return cb(null, true);
-        return cb(new Error('Origin not allowed'));
-      },
+      origin: env.CORS_ORIGINS.length ? env.CORS_ORIGINS : true,
       credentials: true,
+      methods: ['GET', 'POST', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
     }),
   );
+  app.use(helmet());
   app.use(express.json({ limit: '1mb' }));
   app.use(
     rateLimit({
       windowMs: 60 * 1000,
-      limit: 60,
+      limit: 120,
       standardHeaders: true,
       legacyHeaders: false,
+      skip: (req) => req.method === 'OPTIONS',
     }),
   );
 
@@ -205,7 +225,8 @@ export async function createApp() {
   });
 
   app.use((error, _req, res, _next) => {
-    logger.error({ err: error }, 'Unhandled API error');
+    logger.error({ err: error, message: error?.message }, 'Unhandled API error');
+    if (res.headersSent) return;
     res.status(500).json({ error: 'Internal server error' });
   });
 

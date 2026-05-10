@@ -28,12 +28,26 @@ export async function runGmailScan({ userId, res, req }) {
   const gmail = google.gmail({ version: 'v1', auth: oauth2 });
 
   emitStageProgress(res, 1, 1, 1, sourceLabel, messagesScanned.value, ticketsFound);
-  const listRes = await gmail.users.messages.list({
-    userId: 'me',
-    maxResults: env.GMAIL_MAX_MESSAGES,
-    q: 'newer_than:5y (flight OR itinerary OR boarding OR reservation OR ticket)',
-  });
-  const items = listRes.data.messages || [];
+  const q = 'newer_than:5y (flight OR itinerary OR boarding OR reservation OR ticket)';
+  const cap = env.GMAIL_MAX_MESSAGES;
+  /** Gmail allows at most 500 ids per list call; we page until cap or no nextPageToken. */
+  const pageSize = Math.min(500, cap);
+  const items = [];
+  let pageToken;
+  do {
+    const listRes = await gmail.users.messages.list({
+      userId: 'me',
+      q,
+      maxResults: Math.min(pageSize, cap - items.length),
+      pageToken: pageToken || undefined,
+    });
+    const page = listRes.data.messages || [];
+    for (const m of page) {
+      if (items.length >= cap) break;
+      items.push(m);
+    }
+    pageToken = listRes.data.nextPageToken;
+  } while (pageToken && items.length < cap);
   messagesScanned.value = items.length;
 
   emitStageProgress(res, 2, 1, 1, sourceLabel, messagesScanned.value, ticketsFound);
