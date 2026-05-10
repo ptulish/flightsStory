@@ -136,6 +136,7 @@ export default function ScannerProgress() {
           <PaperPlanePath percent={progress.percent} />
 
           <RecentDiscoveries
+            source={source}
             stageKey={progress.stageKey}
             ticketsFound={progress.ticketsFound}
             stageStep={progress.stageStep}
@@ -318,9 +319,10 @@ function formatDurationShort(totalSec) {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-function RecentDiscoveries({ stageKey, ticketsFound, stageStep, recent }) {
+function RecentDiscoveries({ source, stageKey, ticketsFound, stageStep, recent }) {
   const showTicker = stageKey === 'fetch' || stageKey === 'parse' || stageKey === 'save';
-  const fakeFeed = useFakeTicker(ticketsFound, stageStep, showTicker);
+  const useDemoFallback = source === 'demo';
+  const fakeFeed = useFakeTicker(ticketsFound, stageStep, showTicker && useDemoFallback);
 
   if (!showTicker && recent.length === 0) return null;
   const items = recent.length ? recent : fakeFeed;
@@ -328,41 +330,50 @@ function RecentDiscoveries({ stageKey, ticketsFound, stageStep, recent }) {
   return (
     <div className="mt-8">
       <p className="label">Latest discoveries</p>
-      <div className="mt-3 grid gap-2">
-        <AnimatePresence initial={false}>
-          {items.slice(0, 5).map((f, i) => (
-            <motion.div
-              key={f.id || `fk-${i}-${f.from_iata}-${f.to_iata}`}
-              layout
-              initial={{ opacity: 0, x: -10 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.25 }}
-              className="flex items-center gap-3 rounded-xl border border-line bg-bg-soft/60 px-3 py-2 text-sm"
-            >
-              <span
-                className="grid h-7 w-7 place-items-center rounded-lg text-xs font-semibold text-white"
-                style={{ backgroundColor: getAirline(f.airline).color }}
-              >
-                {f.airline}
-              </span>
-              <div className="flex flex-1 items-center gap-2">
-                <span className="font-mono text-xs">{f.from_iata}</span>
-                <Plane className="h-3 w-3 -rotate-90 text-ink-muted" />
-                <span className="font-mono text-xs">{f.to_iata}</span>
-                <span className="ml-1 hidden truncate text-xs text-ink-muted sm:inline">
-                  · {getAirport(f.from_iata)?.city} → {getAirport(f.to_iata)?.city}
-                </span>
-              </div>
-              <span className="hidden text-xs text-ink-muted md:inline">
-                {formatDate(f.departure_date)}
-              </span>
-              <span className="rounded-full border border-emerald-400/30 bg-emerald-400/5 px-2 py-0.5 text-xs text-emerald-300">
-                parsed
-              </span>
-            </motion.div>
-          ))}
-        </AnimatePresence>
+      <div className="mt-3 min-h-[68px]">
+        {items.length === 0 ? (
+          <div className="flex items-center gap-2 rounded-xl border border-line/70 bg-bg-soft/40 px-3 py-3 text-xs text-ink-muted">
+            <span className="inline-flex h-2 w-2 animate-pulse rounded-full bg-brand-300" />
+            Waiting for first parsed ticket...
+          </div>
+        ) : (
+          <div className="grid gap-2">
+            <AnimatePresence initial={false}>
+              {items.slice(0, 5).map((f, i) => (
+                <motion.div
+                  key={f.id || `fk-${i}-${f.from_iata}-${f.to_iata}`}
+                  layout
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.25 }}
+                  className="flex items-center gap-3 rounded-xl border border-line bg-bg-soft/60 px-3 py-2 text-sm"
+                >
+                  <span
+                    className="grid h-7 w-7 place-items-center rounded-lg text-xs font-semibold text-white"
+                    style={{ backgroundColor: getAirline(f.airline).color }}
+                  >
+                    {f.airline}
+                  </span>
+                  <div className="flex flex-1 items-center gap-2">
+                    <span className="font-mono text-xs">{f.from_iata}</span>
+                    <Plane className="h-3 w-3 -rotate-90 text-ink-muted" />
+                    <span className="font-mono text-xs">{f.to_iata}</span>
+                    <span className="ml-1 hidden truncate text-xs text-ink-muted sm:inline">
+                      · {getAirport(f.from_iata)?.city} → {getAirport(f.to_iata)?.city}
+                    </span>
+                  </div>
+                  <span className="hidden text-xs text-ink-muted md:inline">
+                    {formatDate(f.departure_date)}
+                  </span>
+                  <span className="rounded-full border border-emerald-400/30 bg-emerald-400/5 px-2 py-0.5 text-xs text-emerald-300">
+                    parsed
+                  </span>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </div>
+        )}
       </div>
     </div>
   );

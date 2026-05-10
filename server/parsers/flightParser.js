@@ -37,13 +37,58 @@ const MONTHS = {
 };
 
 /** First match wins. Never returns "now" — avoids fake identical timestamps. */
-function extractDepartureDateString(text) {
+function extractDepartureDateString(text, receivedAt) {
   if (!text) return null;
   const lines = String(text).split(/\r?\n/);
-  const focused = lines
-    .filter((line) => /\b(depart|departure|flight|itinerary|outbound|takeoff|arrival|route)\b/i.test(line))
-    .join('\n');
-  return extractDepartureDateFromChunk(focused) || extractDepartureDateFromChunk(text);
+  const focusedLines = lines.filter(
+    (line) =>
+      /\b(depart|departure|flight|itinerary|outbound|takeoff|boarding|arrival|route|segment)\b/i.test(line) ||
+      /\b([A-Z]{2}|[A-Z]\d|\d[A-Z])\s*\d{1,4}\b/.test(line),
+  );
+
+  const bestFocused = pickBestDateCandidate(focusedLines, receivedAt);
+  if (bestFocused) return bestFocused;
+  return pickBestDateCandidate(lines, receivedAt);
+}
+
+function pickBestDateCandidate(lines, receivedAt) {
+  const candidates = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = String(lines[i] || '').trim();
+    if (!line) continue;
+    const iso = extractDepartureDateFromChunk(line);
+    if (!iso) continue;
+    const score = scoreDateLine(line);
+    candidates.push({ iso, score, index: i, day: iso.slice(0, 10) });
+  }
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => b.score - a.score || a.index - b.index);
+  let top = candidates[0];
+  const receivedDay = normalizeDay(receivedAt);
+  // Don't accidentally choose email sent/check-in notification date if alternatives exist.
+  if (receivedDay && top.day === receivedDay && top.score < 4) {
+    const alt = candidates.find((c) => c.day !== receivedDay && c.score >= top.score - 1);
+    if (alt) top = alt;
+  }
+  return top.iso;
+}
+
+function scoreDateLine(line) {
+  const l = String(line || '').toLowerCase();
+  let s = 0;
+  if (/\b(depart|departure|outbound|takeoff|itinerary|segment|flight)\b/.test(l)) s += 4;
+  if (/\bfrom\b.+\bto\b|→/.test(l)) s += 2;
+  if (/\b([a-z]{1}\d|\d[a-z]|[a-z]{2})\s*\d{1,4}\b/i.test(l)) s += 3;
+  if (/\b(check-?in open|booking date|booked on|issued|purchase|invoice|receipt|payment)\b/.test(l)) s -= 4;
+  if (/\b(sent|message-id|delivered)\b/.test(l)) s -= 3;
+  return s;
+}
+
+function normalizeDay(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
 }
 
 function extractDepartureDateFromChunk(text) {
@@ -52,6 +97,15 @@ function extractDepartureDateFromChunk(text) {
   if (m) {
     const t = m[4] && m[5] ? `${m[4]}:${m[5]}` : '12:00';
     return `${m[1]}-${m[2]}-${m[3]}T${t}`;
+  }
+
+  m = text.match(/\b(\d{1,2})[./-](\d{1,2})[./-](20\d{2})\D+(\d{1,2}):(\d{2})\b/);
+  if (m) {
+    const dd = m[1].padStart(2, '0');
+    const mo = m[2].padStart(2, '0');
+    const hh = m[4].padStart(2, '0');
+    const mm = m[5].padStart(2, '0');
+    return `${m[3]}-${mo}-${dd}T${hh}:${mm}`;
   }
 
   m = text.match(/\b(\d{1,2})\.(\d{1,2})\.(20\d{2})\b/);
@@ -114,8 +168,14 @@ export async function parseFlightFromEmail(message) {
   }
   if (!isValidIataCarrierCode(airline)) return null;
 
-  const flightNumber = normalizeFlightNumber(candidate.flight_number, airline);
-  const departureDate = normalizeDepartureDate(candidate.departure_date);
+  const text = `${message.subject || ''}\n${message.bodyText || ''}`;
+  const extractedDate = extractDepartureDateString(text, message.receivedAt);
+  const flightNumber =
+    normalizeFlightNumber(candidate.flight_number, airline) ||
+    normalizeFlightNumber(extractFlightNumberFromText(text, airline), airline);
+  const departureDate = normalizeDepartureDate(
+    pickPreferredDepartureDate(candidate.departure_date, extractedDate, message.receivedAt),
+  );
   if (!flightNumber || !departureDate) return null;
 
   return {
@@ -147,14 +207,14 @@ async function resolveAirport(iataRaw) {
   return found;
 }
 
-function parseHeuristically({ subject, bodyText }) {
+function parseHeuristically({ subject, bodyText, receivedAt }) {
   const text = `${subject || ''}\n${bodyText || ''}`;
   const iatas = Array.from(new Set(text.match(IATA_RE) || [])).filter((code) => AIRPORTS[code]);
   if (iatas.length < 2) return null;
 
   const airlineMatch = text.match(AIRLINE_RE);
   const priceMatch = text.match(PRICE_RE);
-  const date = extractDepartureDateString(text);
+  const date = extractDepartureDateString(text, receivedAt);
   if (!date || !airlineMatch) return null;
 
   const airline = carrierPrefixFromFlightNumber(airlineMatch[0]);
@@ -190,7 +250,7 @@ Rules:
 - airline MUST be the 2-character IATA airline designator only (examples: LH, BT, FR, W6, TK, QR). Never a flight number, never three digits, never a long word.
 - flight_number MUST look like "LH 410" or "BT 282" (carrier space digits).
 - from_iata, to_iata: 3-letter IATA airport codes only.
-- departure_date: scheduled departure in ISO 8601 from the itinerary. Do NOT use today's date. If unknown, return {}.
+- departure_date: scheduled takeoff datetime from itinerary/ticket in ISO 8601. Ignore email sent date, reminder date, check-in-open date, issue date. Do NOT use today's date. If unknown, return {}.
 - If you cannot identify a real commercial flight in this email, return {}.
 
 Subject: ${subject || ''}
@@ -268,6 +328,8 @@ function normalizeFlightNumber(value, airline) {
   const v = String(value || '').trim();
   if (!v) return null;
   if (/^[A-Z0-9]{2,3}\s+\d{1,4}$/i.test(v)) return v.toUpperCase();
+  const designator = extractFlightNumberFromText(v, airline);
+  if (designator) return designator;
   const digits = (v.match(/\d{1,4}/) || [null])[0];
   if (!digits) return null;
   return `${airline} ${digits}`;
@@ -307,6 +369,18 @@ function asOptionalNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function pickPreferredDepartureDate(modelDate, extractedDate, receivedAt) {
+  const m = normalizeDepartureDate(modelDate);
+  const e = normalizeDepartureDate(extractedDate);
+  if (!m) return e;
+  if (!e) return m;
+  const receivedDay = normalizeDay(receivedAt);
+  const mDay = m.slice(0, 10);
+  const eDay = e.slice(0, 10);
+  if (receivedDay && mDay === receivedDay && eDay !== receivedDay) return e;
+  return m;
+}
+
 function inferAirlineFromText(subject, bodyText) {
   const text = `${subject || ''}\n${bodyText || ''}`.toLowerCase();
   if (!text.trim()) return null;
@@ -331,5 +405,17 @@ function inferAirlineFromText(subject, bodyText) {
     if (!AIRLINES[code]) continue;
     if (words.some((w) => text.includes(w))) return code;
   }
+  return null;
+}
+
+function extractFlightNumberFromText(text, airline) {
+  const t = String(text || '').toUpperCase();
+  const a = String(airline || '').toUpperCase();
+  if (!a) return null;
+  const esc = a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let m = t.match(new RegExp(`\\b${esc}\\s*0*(\\d{1,4})\\b`));
+  if (m) return `${a} ${m[1]}`;
+  m = t.match(new RegExp(`\\b${esc}(\\d{1,4})\\b`));
+  if (m) return `${a} ${m[1]}`;
   return null;
 }

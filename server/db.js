@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import pg from 'pg';
 import { env } from './shared/env.js';
-import { computeFlightDedupKey } from './shared/flightDedup.js';
+import { computeFlightDedupKey, flightDesignator } from './shared/flightDedup.js';
 
 const { Pool } = pg;
 
@@ -162,6 +162,25 @@ export async function getUserById(userId) {
 export async function storeFlight(userId, source, messageHash, flight, rawPayload) {
   const id = crypto.randomUUID();
   const dedupKey = computeFlightDedupKey(userId, flight);
+  const subjectForNearDup = String(rawPayload?.subject || flight.raw_subject || '');
+  if (shouldNearDedupBySubject(subjectForNearDup)) {
+    const designator = flightDesignator(flight.flight_number, flight.airline);
+    const nearDup = await pool.query(
+      `
+        SELECT id
+        FROM flights
+        WHERE user_id = $1
+          AND from_iata = $2
+          AND to_iata = $3
+          AND regexp_replace(upper(flight_number), '\s+', '', 'g') = $4
+          AND ABS(EXTRACT(EPOCH FROM (departure_date - $5::timestamptz))) <= 172800
+        LIMIT 1
+      `,
+      [userId, flight.from_iata, flight.to_iata, designator, flight.departure_date],
+    );
+    if (nearDup.rowCount > 0) return false;
+  }
+
   const { rows } = await pool.query(
     `
       INSERT INTO flights (
@@ -225,4 +244,9 @@ export async function listFlights(userId, source) {
     params,
   );
   return rows;
+}
+
+function shouldNearDedupBySubject(subject) {
+  const s = String(subject || '').toLowerCase();
+  return /\b(check-?in|boarding pass|reminder|time to fly|ready to fly|online check)\b/.test(s);
 }

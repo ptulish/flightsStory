@@ -4,7 +4,7 @@ import { SCAN_STAGES, stagePercent } from '../shared/scanStages.js';
 import { sseProgress, sseResult } from '../shared/sse.js';
 import { listFlights } from '../db.js';
 import { enqueueParseJobs, parseQueueEvents } from '../queue.js';
-import { toMessageHash, toPlainText } from './mailUtils.js';
+import { stripRfc822Headers, toMessageHash, toPlainText } from './mailUtils.js';
 
 export async function runIcloudScan({ userId, res, req, session }) {
   let ticketsFound = 0;
@@ -88,7 +88,8 @@ export async function runIcloudScan({ userId, res, req, session }) {
     if (req.destroyed) break;
 
     const subject = msg.envelope?.subject || '';
-    const bodyText = toPlainText(msg.source?.toString('utf8') || '');
+    const rawSource = msg.source?.toString('utf8') || '';
+    const bodyText = toPlainText(stripRfc822Headers(rawSource));
     const messageHash = toMessageHash('icloud', String(msg.uid), subject, msg.internalDate?.toISOString());
 
     candidates.push({

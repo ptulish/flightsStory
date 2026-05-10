@@ -34,5 +34,6 @@ export const AIRLINES = {
 };
 
 export function getAirline(code) {
-  return AIRLINES[code] || { code: code || 'XX', name: 'Unknown airline', color: '#5e85ff' };
+  const c = code || 'XX';
+  return AIRLINES[c] || { code: c, name: c, color: '#5e85ff' };
 }
