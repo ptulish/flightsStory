@@ -1,16 +1,23 @@
 import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Ticket as TicketIcon, Download, AlertTriangle } from 'lucide-react';
+import { Ticket as TicketIcon, Download, AlertTriangle, ExternalLink } from 'lucide-react';
 import { useSession } from '../state/session.jsx';
 import { computeStats } from '../utils/stats';
 import TicketList from '../components/TicketList.jsx';
-import { formatNumber, formatKm, formatCurrency } from '../utils/format';
+import { formatNumber, formatKm, formatCurrency, formatDate } from '../utils/format';
 import { formatFlightNumberForTicket } from '../utils/flightDisplay';
 import {
+  deleteFlight,
   fetchUnresolvedFlights,
   ignoreUnresolvedFlight,
   resolveUnresolvedFlight,
+  updateFlight,
 } from '../api/flights';
+import {
+  emailLinkForFlight,
+  emailLinkForUnresolved,
+  flightsNeedingReview,
+} from '../utils/emailLinks';
 
 export default function Tickets() {
   const { flights, account, setFlights } = useSession();
@@ -18,6 +25,8 @@ export default function Tickets() {
   const [unresolved, setUnresolved] = useState([]);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState('');
+
+  const suspectFlights = useMemo(() => flightsNeedingReview(flights || []), [flights]);
 
   const exportCsv = () => {
     const rows = [
@@ -64,7 +73,7 @@ export default function Tickets() {
     return () => controller.abort();
   }, [account?.scanToken]);
 
-  const onResolve = async (item, patch) => {
+  const onResolveUnresolved = async (item, patch) => {
     setReviewError('');
     const data = await resolveUnresolvedFlight({
       account,
@@ -75,13 +84,25 @@ export default function Tickets() {
     if (Array.isArray(data.flights)) setFlights(data.flights);
   };
 
-  const onIgnore = async (item) => {
+  const onIgnoreUnresolved = async (item) => {
     setReviewError('');
     const items = await ignoreUnresolvedFlight({
       account,
       unresolvedId: item.id,
     });
     setUnresolved(items);
+  };
+
+  const onUpdateFlight = async (flight, patch) => {
+    if (!account?.scanToken) throw new Error('Not connected');
+    const next = await updateFlight({ account, flightId: flight.id, patch });
+    if (Array.isArray(next)) setFlights(next);
+  };
+
+  const onDeleteFlight = async (flight) => {
+    if (!account?.scanToken) throw new Error('Not connected');
+    const next = await deleteFlight({ account, flightId: flight.id });
+    if (Array.isArray(next)) setFlights(next);
   };
 
   return (
@@ -105,12 +126,17 @@ export default function Tickets() {
         </button>
       </motion.div>
 
-      <ManualReviewPanel
+      <ReviewPanel
         loading={reviewLoading}
         error={reviewError}
-        items={unresolved}
-        onResolve={onResolve}
-        onIgnore={onIgnore}
+        unresolved={unresolved}
+        suspect={suspectFlights}
+        accountEmail={account?.email}
+        canEdit={Boolean(account?.scanToken)}
+        onResolveUnresolved={onResolveUnresolved}
+        onIgnoreUnresolved={onIgnoreUnresolved}
+        onUpdateFlight={onUpdateFlight}
+        onDeleteFlight={onDeleteFlight}
       />
 
       {stats.flights.length === 0 ? (
@@ -119,26 +145,46 @@ export default function Tickets() {
           <p className="text-sm text-ink-muted">No tickets parsed yet.</p>
         </div>
       ) : (
-        <TicketList flights={stats.flights} initialPageSize={20} />
+        <TicketList
+          flights={stats.flights}
+          initialPageSize={20}
+          accountEmail={account?.email}
+          canEdit={Boolean(account?.scanToken)}
+          onUpdateFlight={onUpdateFlight}
+          onDeleteFlight={onDeleteFlight}
+        />
       )}
     </div>
   );
 }
 
-function ManualReviewPanel({ loading, error, items, onResolve, onIgnore }) {
-  if (!loading && !error && (!items || items.length === 0)) return null;
+function ReviewPanel({
+  loading,
+  error,
+  unresolved,
+  suspect,
+  accountEmail,
+  canEdit,
+  onResolveUnresolved,
+  onIgnoreUnresolved,
+  onUpdateFlight,
+  onDeleteFlight,
+}) {
+  const total = unresolved.length + suspect.length;
+  if (!loading && !error && total === 0) return null;
   return (
     <section className="card space-y-3 p-4 sm:p-5">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <p className="label">Manual review</p>
-          <h2 className="font-display text-lg font-semibold">Unknown airline/date tickets</h2>
+          <p className="label">Needs your review</p>
+          <h2 className="font-display text-lg font-semibold">Tickets to confirm or fix</h2>
           <p className="text-xs text-ink-muted">
-            If parser could not confirm airline or departure date, fix it here and save.
+            Anything where the parser was unsure (unknown airline / date) or looks like a duplicate.
+            Open the email, fix the fields, save — or delete it.
           </p>
         </div>
         <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2.5 py-1 text-xs text-amber-200">
-          {loading ? 'Loading…' : `${items.length} pending`}
+          {loading ? 'Loading…' : `${total} pending`}
         </span>
       </div>
       {error && (
@@ -152,12 +198,24 @@ function ManualReviewPanel({ loading, error, items, onResolve, onIgnore }) {
         </div>
       ) : (
         <div className="space-y-3">
-          {items.map((item) => (
-            <ManualReviewRow
-              key={item.id}
+          {unresolved.map((item) => (
+            <UnresolvedRow
+              key={`u:${item.id}`}
               item={item}
-              onResolve={onResolve}
-              onIgnore={onIgnore}
+              accountEmail={accountEmail}
+              onResolve={onResolveUnresolved}
+              onIgnore={onIgnoreUnresolved}
+            />
+          ))}
+          {suspect.map(({ flight, issues }) => (
+            <SuspectFlightRow
+              key={`s:${flight.id}`}
+              flight={flight}
+              issues={issues}
+              accountEmail={accountEmail}
+              canEdit={canEdit}
+              onUpdate={onUpdateFlight}
+              onDelete={onDeleteFlight}
             />
           ))}
         </div>
@@ -166,7 +224,7 @@ function ManualReviewPanel({ loading, error, items, onResolve, onIgnore }) {
   );
 }
 
-function ManualReviewRow({ item, onResolve, onIgnore }) {
+function UnresolvedRow({ item, accountEmail, onResolve, onIgnore }) {
   const [airline, setAirline] = useState(String(item.airline || '').toUpperCase().slice(0, 2));
   const [flightNumber, setFlightNumber] = useState(extractDigits(item.flight_number));
   const [fromIata, setFromIata] = useState(String(item.from_iata || '').toUpperCase());
@@ -206,6 +264,8 @@ function ManualReviewRow({ item, onResolve, onIgnore }) {
     }
   };
 
+  const link = emailLinkForUnresolved(item, accountEmail);
+
   return (
     <article className="rounded-xl border border-line bg-bg-soft/40 p-3">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -215,67 +275,36 @@ function ManualReviewRow({ item, onResolve, onIgnore }) {
             {item.source?.toUpperCase()} · {formatDate(item.received_at)}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge tone="amber">unparsed</Badge>
           {(item.reason_codes || []).map((r) => (
-            <span
-              key={r}
-              className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-200"
-            >
-              {prettyReason(r)}
-            </span>
+            <Badge key={r}>{prettyReason(r)}</Badge>
           ))}
         </div>
       </div>
 
-      <p className="mt-2 text-xs leading-relaxed text-ink-muted">{item.body_snippet || 'No body preview'}</p>
+      <p className="mt-2 line-clamp-3 text-xs leading-relaxed text-ink-muted">
+        {item.body_snippet || 'No body preview'}
+      </p>
 
-      {item.source === 'gmail' && item.subject && (
-        <a
-          href={`https://mail.google.com/mail/u/0/#search/${encodeURIComponent(item.subject)}`}
-          target="_blank"
-          rel="noreferrer"
-          className="mt-2 inline-flex items-center gap-1 text-xs text-brand-300 underline-offset-2 hover:underline"
-        >
-          <AlertTriangle className="h-3 w-3" /> Open matching email in Gmail
-        </a>
-      )}
+      {link && <OpenEmailLink href={link} label="Open this email" />}
 
-      <div className="mt-3 grid gap-2 sm:grid-cols-5">
-        <input
-          className="input h-[38px]"
-          value={airline}
-          onChange={(e) => setAirline(e.target.value.toUpperCase().slice(0, 2))}
-          placeholder="Airline (LH)"
-        />
-        <input
-          className="input h-[38px]"
-          value={flightNumber}
-          onChange={(e) => setFlightNumber(e.target.value.replace(/[^\d]/g, '').slice(0, 4))}
-          placeholder="Flight no (410)"
-        />
-        <input
-          className="input h-[38px]"
-          value={fromIata}
-          onChange={(e) => setFromIata(e.target.value.toUpperCase().slice(0, 3))}
-          placeholder="From (FRA)"
-        />
-        <input
-          className="input h-[38px]"
-          value={toIata}
-          onChange={(e) => setToIata(e.target.value.toUpperCase().slice(0, 3))}
-          placeholder="To (VIE)"
-        />
-        <input
-          type="datetime-local"
-          className="input h-[38px]"
-          value={departureLocal}
-          onChange={(e) => setDepartureLocal(e.target.value)}
-        />
-      </div>
+      <FieldsGrid
+        airline={airline}
+        flightNumber={flightNumber}
+        fromIata={fromIata}
+        toIata={toIata}
+        departureLocal={departureLocal}
+        setAirline={setAirline}
+        setFlightNumber={setFlightNumber}
+        setFromIata={setFromIata}
+        setToIata={setToIata}
+        setDepartureLocal={setDepartureLocal}
+      />
 
-      <div className="mt-3 flex items-center gap-2">
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         <button onClick={submit} disabled={busy} className="btn-soft text-xs">
-          {busy ? 'Saving...' : 'Save as ticket'}
+          {busy ? 'Saving…' : 'Save as ticket'}
         </button>
         <button onClick={ignore} disabled={busy} className="btn-ghost text-xs">
           Ignore
@@ -284,6 +313,182 @@ function ManualReviewRow({ item, onResolve, onIgnore }) {
       </div>
     </article>
   );
+}
+
+function SuspectFlightRow({ flight, issues, accountEmail, canEdit, onUpdate, onDelete }) {
+  const [airline, setAirline] = useState(extractCarrierFor(flight));
+  const [flightNumber, setFlightNumber] = useState(extractDigits(flight.flight_number));
+  const [fromIata, setFromIata] = useState(String(flight.from_iata || '').toUpperCase());
+  const [toIata, setToIata] = useState(String(flight.to_iata || '').toUpperCase());
+  const [departureLocal, setDepartureLocal] = useState(toLocalInput(flight.departure_date));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const link = emailLinkForFlight(flight, accountEmail);
+
+  const save = async () => {
+    setErr('');
+    setBusy(true);
+    try {
+      const depIso = departureLocal ? new Date(departureLocal).toISOString() : null;
+      await onUpdate(flight, {
+        airline: airline.trim().toUpperCase(),
+        flight_number: `${airline.trim().toUpperCase()} ${String(flightNumber || '').trim()}`,
+        from_iata: fromIata.trim().toUpperCase(),
+        to_iata: toIata.trim().toUpperCase(),
+        departure_date: depIso,
+      });
+    } catch (e) {
+      setErr(e.message || 'Failed to save');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!window.confirm('Delete this ticket from your history?')) return;
+    setErr('');
+    setBusy(true);
+    try {
+      await onDelete(flight);
+    } catch (e) {
+      setErr(e.message || 'Failed to delete');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <article className="rounded-xl border border-line bg-bg-soft/40 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium">
+            {flight.raw_subject || `${flight.from_iata} → ${flight.to_iata}`}
+          </p>
+          <p className="mt-1 text-xs text-ink-muted">
+            {(flight.source || 'gmail').toUpperCase()} ·{' '}
+            {formatDate(flight.departure_date)} · {flight.from_iata} → {flight.to_iata}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge tone="amber">saved · review</Badge>
+          {issues.map((r) => (
+            <Badge key={r}>{prettyIssue(r)}</Badge>
+          ))}
+        </div>
+      </div>
+
+      {link && <OpenEmailLink href={link} label="Open original email" />}
+
+      <FieldsGrid
+        airline={airline}
+        flightNumber={flightNumber}
+        fromIata={fromIata}
+        toIata={toIata}
+        departureLocal={departureLocal}
+        setAirline={setAirline}
+        setFlightNumber={setFlightNumber}
+        setFromIata={setFromIata}
+        setToIata={setToIata}
+        setDepartureLocal={setDepartureLocal}
+      />
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button onClick={save} disabled={busy || !canEdit} className="btn-soft text-xs">
+          {busy ? 'Saving…' : 'Save changes'}
+        </button>
+        <button onClick={remove} disabled={busy || !canEdit} className="btn-ghost text-xs text-red-200 hover:!bg-red-500/10">
+          Delete
+        </button>
+        {!canEdit && (
+          <span className="text-xs text-ink-muted">
+            Reconnect Gmail/iCloud to edit saved tickets.
+          </span>
+        )}
+        {err && <span className="text-xs text-red-300">{err}</span>}
+      </div>
+    </article>
+  );
+}
+
+function FieldsGrid({
+  airline,
+  flightNumber,
+  fromIata,
+  toIata,
+  departureLocal,
+  setAirline,
+  setFlightNumber,
+  setFromIata,
+  setToIata,
+  setDepartureLocal,
+}) {
+  return (
+    <div className="mt-3 grid gap-2 sm:grid-cols-5">
+      <input
+        className="input h-[38px]"
+        value={airline}
+        onChange={(e) => setAirline(e.target.value.toUpperCase().slice(0, 2))}
+        placeholder="Airline (LH)"
+      />
+      <input
+        className="input h-[38px]"
+        value={flightNumber}
+        onChange={(e) => setFlightNumber(e.target.value.replace(/[^\d]/g, '').slice(0, 4))}
+        placeholder="Flight no (410)"
+      />
+      <input
+        className="input h-[38px]"
+        value={fromIata}
+        onChange={(e) => setFromIata(e.target.value.toUpperCase().slice(0, 3))}
+        placeholder="From (FRA)"
+      />
+      <input
+        className="input h-[38px]"
+        value={toIata}
+        onChange={(e) => setToIata(e.target.value.toUpperCase().slice(0, 3))}
+        placeholder="To (VIE)"
+      />
+      <input
+        type="datetime-local"
+        className="input h-[38px]"
+        value={departureLocal}
+        onChange={(e) => setDepartureLocal(e.target.value)}
+      />
+    </div>
+  );
+}
+
+function OpenEmailLink({ href, label }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="mt-2 inline-flex items-center gap-1 text-xs text-brand-300 underline-offset-2 hover:underline"
+    >
+      <ExternalLink className="h-3 w-3" /> {label}
+    </a>
+  );
+}
+
+function Badge({ children, tone = 'neutral' }) {
+  const cls =
+    tone === 'amber'
+      ? 'border-amber-400/30 bg-amber-500/10 text-amber-200'
+      : 'border-line bg-bg-soft/60 text-ink-muted';
+  return (
+    <span className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wider ${cls}`}>
+      {children}
+    </span>
+  );
+}
+
+function extractCarrierFor(flight) {
+  const a = String(flight?.airline || '').trim().toUpperCase();
+  if (/^[A-Z0-9]{2}$/.test(a) && a !== 'XX' && !/^\d{2}$/.test(a)) return a;
+  const fn = String(flight?.flight_number || '').toUpperCase();
+  const m = fn.match(/^([A-Z]{2}|[A-Z]\d|\d[A-Z])\b/);
+  return m && m[1] !== 'XX' ? m[1] : '';
 }
 
 function extractDigits(value) {
@@ -307,6 +512,16 @@ function prettyReason(code) {
     missing_airline: 'airline missing',
     missing_flight_number: 'flight no missing',
     missing_departure_date: 'date missing',
+  };
+  return map[code] || code;
+}
+
+function prettyIssue(code) {
+  const map = {
+    unknown_airline: 'unknown airline',
+    weak_flight_number: 'weak flight no',
+    possible_duplicate: 'possible duplicate',
+    missing_route: 'route missing',
   };
   return map[code] || code;
 }

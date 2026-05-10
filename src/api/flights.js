@@ -219,6 +219,34 @@ export async function resolveUnresolvedFlight({
   };
 }
 
+export async function updateFlight({ account, flightId, patch, signal } = {}) {
+  if (!account?.scanToken) throw new Error('Missing scan token');
+  const res = await fetch(`${API_BASE}/api/flights/${encodeURIComponent(flightId)}/update`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      Authorization: `Bearer ${account.scanToken}`,
+    },
+    body: JSON.stringify(patch || {}),
+    signal,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Failed to update flight');
+  return Array.isArray(data.flights) ? data.flights : null;
+}
+
+export async function deleteFlight({ account, flightId, signal } = {}) {
+  if (!account?.scanToken) throw new Error('Missing scan token');
+  const res = await fetch(`${API_BASE}/api/flights/${encodeURIComponent(flightId)}/delete`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${account.scanToken}` },
+    signal,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Failed to delete flight');
+  return Array.isArray(data.flights) ? data.flights : null;
+}
+
 export async function ignoreUnresolvedFlight({ account, unresolvedId, signal } = {}) {
   if (!account?.scanToken) throw new Error('Missing scan token');
   const res = await fetch(`${API_BASE}/api/review/unresolved/${encodeURIComponent(unresolvedId)}/ignore`, {

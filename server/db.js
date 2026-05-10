@@ -112,7 +112,11 @@ async function migrateFlightDedupSchema() {
     )
   `);
 
-  /** Garbage-only duplicates (e.g. three XX rows for one segment) without touching mixed carrier groups. */
+  /**
+   * Same physical segment parsed from several emails (booking / check-in / reminder)
+   * → one row per (user, from, to, departure minute). Quality score keeps the best:
+   *   manual edits > known IATA carrier > longer flight_number > earlier created_at.
+   */
   await pool.query(`
     DELETE FROM flights
     WHERE id IN (
@@ -121,19 +125,18 @@ async function migrateFlightDedupSchema() {
           ROW_NUMBER() OVER (
             PARTITION BY f.user_id, f.from_iata, f.to_iata,
               date_trunc('minute', f.departure_date)
-            ORDER BY length(f.flight_number) DESC, f.created_at ASC, f.id ASC
+            ORDER BY
+              CASE WHEN coalesce(f.raw_payload->>'manualResolution','') = 'true'
+                    OR coalesce(f.raw_payload->>'manualEdit','') = 'true'
+                   THEN 0 ELSE 1 END,
+              CASE WHEN upper(coalesce(f.airline,'')) IN ('','XX','UN')
+                    OR f.airline ~ '^[0-9]{2}$'
+                   THEN 1 ELSE 0 END,
+              length(coalesce(f.flight_number,'')) DESC,
+              f.created_at ASC,
+              f.id ASC
           ) AS rn
         FROM flights f
-        INNER JOIN (
-          SELECT user_id, from_iata, to_iata, date_trunc('minute', departure_date) AS slot
-          FROM flights
-          GROUP BY user_id, from_iata, to_iata, date_trunc('minute', departure_date)
-          HAVING COUNT(*) > 1 AND bool_and(upper(airline) IN ('XX', 'UN'))
-        ) x
-          ON f.user_id = x.user_id
-          AND f.from_iata = x.from_iata
-          AND f.to_iata = x.to_iata
-          AND date_trunc('minute', f.departure_date) = x.slot
       ) t
       WHERE rn > 1
     )
@@ -214,6 +217,45 @@ export async function getUserById(userId) {
 export async function storeFlight(userId, source, messageHash, flight, rawPayload) {
   const id = crypto.randomUUID();
   const dedupKey = computeFlightDedupKey(userId, flight);
+
+  /**
+   * Segment-level dedup: a passenger can only be on one plane per minute.
+   * Same (user, from, to, departure ±15 min) is the same physical flight,
+   * even if two emails parsed different designators (e.g. "A2 20" vs "BT 274").
+   * Pick the higher-quality row and drop the rest.
+   */
+  const segmentDup = await pool.query(
+    `
+      SELECT id, airline, flight_number, raw_payload, created_at
+      FROM flights
+      WHERE user_id = $1
+        AND from_iata = $2
+        AND to_iata = $3
+        AND ABS(EXTRACT(EPOCH FROM (departure_date - $4::timestamptz))) <= 900
+      ORDER BY created_at ASC
+      LIMIT 5
+    `,
+    [userId, flight.from_iata, flight.to_iata, flight.departure_date],
+  );
+  if (segmentDup.rowCount > 0) {
+    const incomingScore = scoreFlightQuality(flight, rawPayload);
+    let bestExisting = segmentDup.rows[0];
+    let bestScore = scoreFlightQuality(bestExisting, bestExisting.raw_payload);
+    for (const row of segmentDup.rows.slice(1)) {
+      const s = scoreFlightQuality(row, row.raw_payload);
+      if (s > bestScore) {
+        bestScore = s;
+        bestExisting = row;
+      }
+    }
+    if (incomingScore <= bestScore) {
+      return false;
+    }
+    await pool.query(`DELETE FROM flights WHERE id = ANY($1::text[])`, [
+      segmentDup.rows.map((r) => r.id),
+    ]);
+  }
+
   const subjectForNearDup = String(rawPayload?.subject || flight.raw_subject || '');
   if (shouldNearDedupBySubject(subjectForNearDup)) {
     const designator = flightDesignator(flight.flight_number, flight.airline);
@@ -471,4 +513,115 @@ export async function listFlights(userId, source) {
 function shouldNearDedupBySubject(subject) {
   const s = String(subject || '').toLowerCase();
   return /\b(check-?in|boarding pass|reminder|time to fly|ready to fly|online check)\b/.test(s);
+}
+
+function scoreFlightQuality(flight, rawPayload) {
+  let score = 0;
+  const payload = rawPayload || flight?.raw_payload || {};
+  if (payload?.manualResolution === true || payload?.manualEdit === true) score += 100;
+  const a = String(flight?.airline || '').toUpperCase().trim();
+  if (a && a !== 'XX' && a !== 'UN' && /^[A-Z0-9]{2}$/.test(a) && !/^\d{2}$/.test(a)) score += 10;
+  const fn = String(flight?.flight_number || '').trim();
+  if (/[A-Z]{2}\s+\d{1,4}/i.test(fn)) score += 3;
+  if (fn.length > 5) score += 1;
+  if (flight?.price != null && flight?.price !== '') score += 1;
+  if (flight?.duration_min != null) score += 1;
+  if (flight?.cabin && flight.cabin !== 'economy') score += 1;
+  return score;
+}
+
+export async function getFlightById(userId, flightId) {
+  const { rows } = await pool.query(
+    `SELECT * FROM flights WHERE id = $1 AND user_id = $2 LIMIT 1`,
+    [flightId, userId],
+  );
+  return rows[0] || null;
+}
+
+export async function deleteFlight(userId, flightId) {
+  const { rowCount } = await pool.query(
+    `DELETE FROM flights WHERE id = $1 AND user_id = $2`,
+    [flightId, userId],
+  );
+  return rowCount > 0;
+}
+
+/**
+ * Edit airline / flight number / route / departure for a saved flight.
+ * Recomputes dedup_key and refuses if the change would collide with another
+ * existing flight for the same user.
+ */
+export async function updateFlight(userId, flightId, patch = {}) {
+  const current = await getFlightById(userId, flightId);
+  if (!current) throw new Error('Flight not found');
+
+  const airline = String(patch.airline ?? current.airline ?? '').trim().toUpperCase();
+  const fromIata = String(patch.from_iata ?? current.from_iata ?? '').trim().toUpperCase();
+  const toIata = String(patch.to_iata ?? current.to_iata ?? '').trim().toUpperCase();
+  const dateValue = patch.departure_date ?? current.departure_date;
+
+  if (!/^[A-Z0-9]{2}$/.test(airline) || /^\d{2}$/.test(airline) || airline === 'XX') {
+    throw new Error('Airline must be a valid 2-char IATA carrier code');
+  }
+  if (!/^[A-Z]{3}$/.test(fromIata) || !/^[A-Z]{3}$/.test(toIata)) {
+    throw new Error('Route must contain valid IATA airport codes');
+  }
+  const departureDate = new Date(dateValue);
+  if (Number.isNaN(departureDate.getTime())) {
+    throw new Error('Departure date is required');
+  }
+
+  const designator = flightDesignator(
+    patch.flight_number ?? current.flight_number ?? '',
+    airline,
+  );
+  const m = designator.match(/^([A-Z0-9]{2})(\d{1,4})$/);
+  if (!m) throw new Error('Flight number is required');
+  const flightNumber = `${m[1]} ${m[2]}`;
+
+  const updated = {
+    airline,
+    flight_number: flightNumber,
+    from_iata: fromIata,
+    to_iata: toIata,
+    departure_date: departureDate.toISOString(),
+  };
+
+  const newDedupKey = computeFlightDedupKey(userId, updated);
+  const collision = await pool.query(
+    `SELECT id FROM flights WHERE user_id = $1 AND dedup_key = $2 AND id <> $3 LIMIT 1`,
+    [userId, newDedupKey, flightId],
+  );
+  if (collision.rowCount > 0) {
+    throw new Error('Another flight already exists with the same airline / number / route / date');
+  }
+
+  const nextPayload = { ...(current.raw_payload || {}), manualEdit: true };
+
+  await pool.query(
+    `
+      UPDATE flights
+      SET airline = $1,
+          flight_number = $2,
+          from_iata = $3,
+          to_iata = $4,
+          departure_date = $5,
+          dedup_key = $6,
+          raw_payload = $7
+      WHERE id = $8 AND user_id = $9
+    `,
+    [
+      updated.airline,
+      updated.flight_number,
+      updated.from_iata,
+      updated.to_iata,
+      updated.departure_date,
+      newDedupKey,
+      nextPayload,
+      flightId,
+      userId,
+    ],
+  );
+
+  return true;
 }

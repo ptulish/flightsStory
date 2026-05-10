@@ -8,6 +8,9 @@ import {
   ChevronDown,
   ChevronUp,
   X,
+  ExternalLink,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { getAirport } from '../data/airports';
@@ -24,12 +27,17 @@ import {
   formatFlightNumberForTicket,
   resolveCarrierCode,
 } from '../utils/flightDisplay';
+import { emailLinkForFlight } from '../utils/emailLinks';
 
 export default function TicketList({
   flights,
   initialPageSize = 12,
   showFilters = true,
   compact = false,
+  accountEmail,
+  canEdit = false,
+  onUpdateFlight,
+  onDeleteFlight,
 }) {
   const [search, setSearch] = useState('');
   const [year, setYear] = useState('all');
@@ -163,7 +171,16 @@ export default function TicketList({
       <div className="divide-y divide-line/60">
         <AnimatePresence initial={false}>
           {visible.map((f, idx) => (
-            <Row key={f.id} flight={f} index={idx} compact={compact} />
+            <Row
+              key={f.id}
+              flight={f}
+              index={idx}
+              compact={compact}
+              accountEmail={accountEmail}
+              canEdit={canEdit}
+              onUpdateFlight={onUpdateFlight}
+              onDeleteFlight={onDeleteFlight}
+            />
           ))}
         </AnimatePresence>
         {sorted.length === 0 && (
@@ -197,12 +214,14 @@ export default function TicketList({
   );
 }
 
-function Row({ flight, index, compact }) {
+function Row({ flight, index, compact, accountEmail, canEdit, onUpdateFlight, onDeleteFlight }) {
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
   const from = flight.from || getAirport(flight.from_iata);
   const to = flight.to || getAirport(flight.to_iata);
   const airline = flight.airline_info || getAirline(resolveCarrierCode(flight));
   const flightNo = formatFlightNumberForTicket(flight);
+  const emailLink = emailLinkForFlight(flight, accountEmail);
 
   return (
     <motion.div
@@ -296,20 +315,15 @@ function Row({ flight, index, compact }) {
                 <p className="truncate font-mono text-xs text-ink-muted">
                   {flight.raw_subject}
                 </p>
-                {flight.source === 'gmail' && flight.raw_subject && (
+                {emailLink && (
                   <a
-                    href={`https://mail.google.com/mail/u/0/#search/${encodeURIComponent(flight.raw_subject)}`}
+                    href={emailLink}
                     target="_blank"
                     rel="noreferrer"
-                    className="mt-2 inline-block text-xs text-brand-300 underline-offset-2 hover:underline"
+                    className="mt-2 inline-flex items-center gap-1 text-xs text-brand-300 underline-offset-2 hover:underline"
                   >
-                    Search this subject in Gmail
+                    <ExternalLink className="h-3 w-3" /> Open in Gmail
                   </a>
-                )}
-                {flight.source === 'gmail' && flight.raw_payload?.messageId && (
-                  <p className="mt-1 break-all font-mono text-[10px] text-ink-dim">
-                    Gmail message id: {flight.raw_payload.messageId}
-                  </p>
                 )}
               </Detail>
               <Detail label="From">
@@ -329,6 +343,45 @@ function Row({ flight, index, compact }) {
                 </p>
               </Detail>
             </div>
+
+            {canEdit && (
+              <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-line/40 pt-3">
+                {!editing && (
+                  <button
+                    type="button"
+                    onClick={() => setEditing(true)}
+                    className="btn-ghost text-xs"
+                  >
+                    <Pencil className="h-3.5 w-3.5" /> Edit
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!window.confirm('Delete this ticket from your history?')) return;
+                    try {
+                      await onDeleteFlight?.(flight);
+                    } catch (e) {
+                      window.alert(e?.message || 'Failed to delete');
+                    }
+                  }}
+                  className="btn-ghost text-xs text-red-200 hover:!bg-red-500/10"
+                >
+                  <Trash2 className="h-3.5 w-3.5" /> Delete
+                </button>
+              </div>
+            )}
+
+            {canEdit && editing && (
+              <InlineEditor
+                flight={flight}
+                onCancel={() => setEditing(false)}
+                onSave={async (patch) => {
+                  await onUpdateFlight?.(flight, patch);
+                  setEditing(false);
+                }}
+              />
+            )}
           </motion.div>
         )}
       </AnimatePresence>
@@ -403,4 +456,101 @@ const COMPARATORS = {
 
 function capitalize(s) {
   return s ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+function InlineEditor({ flight, onSave, onCancel }) {
+  const [airline, setAirline] = useState(carrierForEditor(flight));
+  const [flightNumber, setFlightNumber] = useState(digitsForEditor(flight.flight_number));
+  const [fromIata, setFromIata] = useState(String(flight.from_iata || '').toUpperCase());
+  const [toIata, setToIata] = useState(String(flight.to_iata || '').toUpperCase());
+  const [departureLocal, setDepartureLocal] = useState(toLocalInputValue(flight.departure_date));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const submit = async () => {
+    setErr('');
+    setBusy(true);
+    try {
+      const depIso = departureLocal ? new Date(departureLocal).toISOString() : null;
+      await onSave({
+        airline: airline.trim().toUpperCase(),
+        flight_number: `${airline.trim().toUpperCase()} ${String(flightNumber || '').trim()}`,
+        from_iata: fromIata.trim().toUpperCase(),
+        to_iata: toIata.trim().toUpperCase(),
+        departure_date: depIso,
+      });
+    } catch (e) {
+      setErr(e?.message || 'Failed to save');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 space-y-2 rounded-xl border border-line/60 bg-bg-soft/60 p-3">
+      <div className="grid gap-2 sm:grid-cols-5">
+        <input
+          className="input h-[38px]"
+          value={airline}
+          onChange={(e) => setAirline(e.target.value.toUpperCase().slice(0, 2))}
+          placeholder="Airline (LH)"
+        />
+        <input
+          className="input h-[38px]"
+          value={flightNumber}
+          onChange={(e) => setFlightNumber(e.target.value.replace(/[^\d]/g, '').slice(0, 4))}
+          placeholder="Flight no (410)"
+        />
+        <input
+          className="input h-[38px]"
+          value={fromIata}
+          onChange={(e) => setFromIata(e.target.value.toUpperCase().slice(0, 3))}
+          placeholder="From (FRA)"
+        />
+        <input
+          className="input h-[38px]"
+          value={toIata}
+          onChange={(e) => setToIata(e.target.value.toUpperCase().slice(0, 3))}
+          placeholder="To (VIE)"
+        />
+        <input
+          type="datetime-local"
+          className="input h-[38px]"
+          value={departureLocal}
+          onChange={(e) => setDepartureLocal(e.target.value)}
+        />
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <button onClick={submit} disabled={busy} className="btn-soft text-xs">
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+        <button onClick={onCancel} disabled={busy} className="btn-ghost text-xs">
+          Cancel
+        </button>
+        {err && <span className="text-xs text-red-300">{err}</span>}
+      </div>
+    </div>
+  );
+}
+
+function carrierForEditor(flight) {
+  const a = String(flight?.airline || '').trim().toUpperCase();
+  if (/^[A-Z0-9]{2}$/.test(a) && a !== 'XX' && !/^\d{2}$/.test(a)) return a;
+  const fn = String(flight?.flight_number || '').toUpperCase();
+  const m = fn.match(/^([A-Z]{2}|[A-Z]\d|\d[A-Z])\b/);
+  return m && m[1] !== 'XX' ? m[1] : '';
+}
+
+function digitsForEditor(value) {
+  const m = String(value || '').match(/\d{1,4}/);
+  return m ? m[0] : '';
+}
+
+function toLocalInputValue(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(
+    d.getMinutes(),
+  )}`;
 }

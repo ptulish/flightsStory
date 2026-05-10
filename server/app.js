@@ -8,6 +8,7 @@ import { httpLogger, logger } from './shared/logger.js';
 import { getBearerToken, signScanToken, verifyScanToken } from './shared/auth.js';
 import { initSse, sseError } from './shared/sse.js';
 import {
+  deleteFlight,
   ensureSchema,
   getUserById,
   ignoreUnresolvedFlight,
@@ -15,6 +16,7 @@ import {
   listUnresolvedFlights,
   resolveUnresolvedFlight,
   saveGoogleTokens,
+  updateFlight,
   upsertUser,
 } from './db.js';
 import {
@@ -275,6 +277,35 @@ export async function createApp() {
     } catch (error) {
       logger.warn({ err: error }, 'ignore unresolved failed');
       res.status(400).json({ error: error.message || 'Unable to ignore item' });
+    }
+  });
+
+  app.post('/api/flights/:id/update', async (req, res) => {
+    try {
+      const auth = getAuthFromRequest(req);
+      const user = await getUserById(auth.sub);
+      if (!user) throw new Error('User not found');
+      await updateFlight(user.id, String(req.params.id), req.body || {});
+      const flights = await listFlights(user.id, auth.source);
+      res.json({ ok: true, flights });
+    } catch (error) {
+      logger.warn({ err: error, flightId: req.params.id }, 'update flight failed');
+      res.status(400).json({ error: error.message || 'Unable to update flight' });
+    }
+  });
+
+  app.post('/api/flights/:id/delete', async (req, res) => {
+    try {
+      const auth = getAuthFromRequest(req);
+      const user = await getUserById(auth.sub);
+      if (!user) throw new Error('User not found');
+      const ok = await deleteFlight(user.id, String(req.params.id));
+      if (!ok) throw new Error('Flight not found');
+      const flights = await listFlights(user.id, auth.source);
+      res.json({ ok: true, flights });
+    } catch (error) {
+      logger.warn({ err: error, flightId: req.params.id }, 'delete flight failed');
+      res.status(400).json({ error: error.message || 'Unable to delete flight' });
     }
   });
 
