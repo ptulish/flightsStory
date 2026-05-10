@@ -54,11 +54,15 @@ export default function ScannerProgress() {
       onProgress: (p) => {
         setProgress(p);
         setLastEventAt(Date.now());
+        if (p.latestDiscovery) {
+          const item = p.latestDiscovery;
+          const key = `${item.airline}-${item.from_iata}-${item.to_iata}-${item.departure_date}`;
+          setRecentTickets((prev) => {
+            const next = [item, ...prev.filter((x) => `${x.airline}-${x.from_iata}-${x.to_iata}-${x.departure_date}` !== key)];
+            return next.slice(0, 6);
+          });
+        }
         if (p.ticketsFound > lastSeenRef.current) {
-          // Find the just-discovered tickets to display ticker.
-          // We don't have direct access to them here, so we add placeholders that
-          // get replaced when scan completes; but we can synthesize random-looking
-          // recent rows from p.ticketsFound. For demo polish we use a flicker.
           lastSeenRef.current = p.ticketsFound;
         }
       },
@@ -134,6 +138,7 @@ export default function ScannerProgress() {
           <RecentDiscoveries
             stageKey={progress.stageKey}
             ticketsFound={progress.ticketsFound}
+            stageStep={progress.stageStep}
             recent={recentTickets}
           />
         </div>
@@ -313,9 +318,9 @@ function formatDurationShort(totalSec) {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-function RecentDiscoveries({ stageKey, ticketsFound, recent }) {
+function RecentDiscoveries({ stageKey, ticketsFound, stageStep, recent }) {
   const showTicker = stageKey === 'fetch' || stageKey === 'parse' || stageKey === 'save';
-  const fakeFeed = useFakeTicker(ticketsFound, showTicker);
+  const fakeFeed = useFakeTicker(ticketsFound, stageStep, showTicker);
 
   if (!showTicker && recent.length === 0) return null;
   const items = recent.length ? recent : fakeFeed;
@@ -364,13 +369,15 @@ function RecentDiscoveries({ stageKey, ticketsFound, recent }) {
 }
 
 // Synthesizes a small ticker of plausible-looking discoveries during scan.
-function useFakeTicker(ticketsFound, enabled) {
+function useFakeTicker(ticketsFound, stageStep, enabled) {
   const [pool] = useState(() => SAMPLE_FEED);
   return useMemo(() => {
     if (!enabled) return [];
-    const n = Math.min(pool.length, Math.max(1, ticketsFound % pool.length));
-    return pool.slice(0, n).map((row, i) => ({ ...row, id: `live-${ticketsFound}-${i}` }));
-  }, [pool, ticketsFound, enabled]);
+    const n = Math.min(pool.length, Math.max(1, ((stageStep || 1) % pool.length) + 1));
+    const start = Math.abs((ticketsFound || 0) + (stageStep || 0)) % pool.length;
+    const rotated = [...pool.slice(start), ...pool.slice(0, start)];
+    return rotated.slice(0, n).map((row, i) => ({ ...row, id: `live-${ticketsFound}-${stageStep}-${i}` }));
+  }, [pool, ticketsFound, stageStep, enabled]);
 }
 
 const SAMPLE_FEED = [

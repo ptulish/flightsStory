@@ -83,6 +83,10 @@ async function runScan({ onProgress, signal, flights, sourceLabel, fakeMessages 
         ticketsFound: counter,
         stageStep: s + 1,
         stageTotalSteps: stageSteps,
+        latestDiscovery:
+          found.length > 0 && (stage.key === 'fetch' || stage.key === 'parse')
+            ? found[found.length - 1]
+            : undefined,
       });
 
       await sleep(60 + Math.random() * 60);

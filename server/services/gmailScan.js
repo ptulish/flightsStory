@@ -10,6 +10,7 @@ export async function runGmailScan({ userId, res, req }) {
   let ticketsFound = 0;
   const sourceLabel = 'Gmail';
   const messagesScanned = { value: 0 };
+  const parseBatchSize = 40;
 
   emitStageProgress(res, 0, 0, 1, sourceLabel, messagesScanned.value, ticketsFound);
 
@@ -53,6 +54,41 @@ export async function runGmailScan({ userId, res, req }) {
   emitStageProgress(res, 2, 1, 1, sourceLabel, messagesScanned.value, ticketsFound);
 
   const candidates = [];
+  let fetchedCount = 0;
+  const totalForProgress = Math.max(1, items.length);
+
+  const flushCandidateBatch = async () => {
+    if (candidates.length === 0) return;
+    const chunk = candidates.splice(0, candidates.length);
+    const jobs = await enqueueParseJobs(chunk);
+
+    for (let j = 0; j < jobs.length; j += 1) {
+      if (req.destroyed) break;
+      const result = await jobs[j].waitUntilFinished(parseQueueEvents, 120000).catch(() => null);
+      if (result?.inserted) ticketsFound += 1;
+      // Keep progress in "fetch" while batching to avoid regressions in stage percent.
+      emitStageProgress(
+        res,
+        3,
+        fetchedCount,
+        totalForProgress,
+        sourceLabel,
+        messagesScanned.value,
+        ticketsFound,
+        result?.parsed
+          ? {
+              latestDiscovery: {
+                airline: result.parsed.airline,
+                from_iata: result.parsed.from_iata,
+                to_iata: result.parsed.to_iata,
+                departure_date: result.parsed.departure_date,
+              },
+            }
+          : undefined,
+      );
+    }
+  };
+
   for (let i = 0; i < items.length; i += 1) {
     if (req.destroyed) break;
     const msg = items[i];
@@ -80,33 +116,24 @@ export async function runGmailScan({ userId, res, req }) {
       internalDateMs,
     });
 
+    fetchedCount = i + 1;
     emitStageProgress(
       res,
       3,
-      i + 1,
-      Math.max(1, items.length),
+      fetchedCount,
+      totalForProgress,
       sourceLabel,
       messagesScanned.value,
       ticketsFound,
     );
+
+    if (candidates.length >= parseBatchSize) {
+      await flushCandidateBatch();
+    }
   }
 
-  const jobs = await enqueueParseJobs(candidates);
-
-  for (let i = 0; i < jobs.length; i += 1) {
-    if (req.destroyed) break;
-    const result = await jobs[i].waitUntilFinished(parseQueueEvents, 120000).catch(() => null);
-    if (result?.inserted) ticketsFound += 1;
-    emitStageProgress(
-      res,
-      4,
-      i + 1,
-      Math.max(1, jobs.length),
-      sourceLabel,
-      messagesScanned.value,
-      ticketsFound,
-    );
-  }
+  await flushCandidateBatch();
+  emitStageProgress(res, 4, 1, 1, sourceLabel, messagesScanned.value, ticketsFound);
 
   emitStageProgress(res, 5, 1, 1, sourceLabel, messagesScanned.value, ticketsFound);
   const flights = await listFlights(userId, 'gmail');
@@ -121,7 +148,16 @@ export async function runGmailScan({ userId, res, req }) {
   sseResult(res, flights);
 }
 
-function emitStageProgress(res, stageIdx, step, totalSteps, sourceLabel, messagesScanned, ticketsFound) {
+function emitStageProgress(
+  res,
+  stageIdx,
+  step,
+  totalSteps,
+  sourceLabel,
+  messagesScanned,
+  ticketsFound,
+  extra = undefined,
+) {
   const stage = SCAN_STAGES[stageIdx];
   sseProgress(res, {
     percent: stagePercent(stageIdx, step, totalSteps),
@@ -132,5 +168,6 @@ function emitStageProgress(res, stageIdx, step, totalSteps, sourceLabel, message
     ticketsFound,
     stageStep: step,
     stageTotalSteps: totalSteps,
+    ...(extra || {}),
   });
 }

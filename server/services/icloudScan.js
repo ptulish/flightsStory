@@ -10,6 +10,7 @@ export async function runIcloudScan({ userId, res, req, session }) {
   let ticketsFound = 0;
   const sourceLabel = 'iCloud';
   let messagesScanned = 0;
+  const parseBatchSize = 40;
 
   const client = new ImapFlow({
     host: session.server || env.IMAP_DEFAULT_HOST,
@@ -45,6 +46,39 @@ export async function runIcloudScan({ userId, res, req, session }) {
   }
 
   const candidates = [];
+  let fetchedCount = 0;
+  const totalForProgress = Math.max(1, selected.length);
+
+  const flushCandidateBatch = async () => {
+    if (candidates.length === 0) return;
+    const chunk = candidates.splice(0, candidates.length);
+    const jobs = await enqueueParseJobs(chunk);
+    for (let j = 0; j < jobs.length; j += 1) {
+      if (req.destroyed) break;
+      const result = await jobs[j].waitUntilFinished(parseQueueEvents, 120000).catch(() => null);
+      if (result?.inserted) ticketsFound += 1;
+      emitStageProgress(
+        res,
+        3,
+        fetchedCount,
+        totalForProgress,
+        sourceLabel,
+        messagesScanned,
+        ticketsFound,
+        result?.parsed
+          ? {
+              latestDiscovery: {
+                airline: result.parsed.airline,
+                from_iata: result.parsed.from_iata,
+                to_iata: result.parsed.to_iata,
+                departure_date: result.parsed.departure_date,
+              },
+            }
+          : undefined,
+      );
+    }
+  };
+
   for await (const msg of client.fetch(selected, {
     uid: true,
     envelope: true,
@@ -67,33 +101,25 @@ export async function runIcloudScan({ userId, res, req, session }) {
       receivedAt: msg.internalDate?.toISOString() || '',
     });
 
+    fetchedCount += 1;
     emitStageProgress(
       res,
       3,
-      candidates.length,
-      Math.max(1, selected.length),
+      fetchedCount,
+      totalForProgress,
       sourceLabel,
       messagesScanned,
       ticketsFound,
     );
+
+    if (candidates.length >= parseBatchSize) {
+      await flushCandidateBatch();
+    }
   }
   await client.logout();
 
-  const jobs = await enqueueParseJobs(candidates);
-  for (let i = 0; i < jobs.length; i += 1) {
-    if (req.destroyed) break;
-    const result = await jobs[i].waitUntilFinished(parseQueueEvents, 120000).catch(() => null);
-    if (result?.inserted) ticketsFound += 1;
-    emitStageProgress(
-      res,
-      4,
-      i + 1,
-      Math.max(1, jobs.length),
-      sourceLabel,
-      messagesScanned,
-      ticketsFound,
-    );
-  }
+  await flushCandidateBatch();
+  emitStageProgress(res, 4, 1, 1, sourceLabel, messagesScanned, ticketsFound);
 
   emitStageProgress(res, 5, 1, 1, sourceLabel, messagesScanned, ticketsFound);
   const flights = await listFlights(userId, 'icloud');
@@ -120,7 +146,16 @@ export async function validateIcloudCredentials({ email, appPassword, server }) 
   await client.logout();
 }
 
-function emitStageProgress(res, stageIdx, step, totalSteps, sourceLabel, messagesScanned, ticketsFound) {
+function emitStageProgress(
+  res,
+  stageIdx,
+  step,
+  totalSteps,
+  sourceLabel,
+  messagesScanned,
+  ticketsFound,
+  extra = undefined,
+) {
   const stage = SCAN_STAGES[stageIdx];
   sseProgress(res, {
     percent: stagePercent(stageIdx, step, totalSteps),
@@ -131,5 +166,6 @@ function emitStageProgress(res, stageIdx, step, totalSteps, sourceLabel, message
     ticketsFound,
     stageStep: step,
     stageTotalSteps: totalSteps,
+    ...(extra || {}),
   });
 }
